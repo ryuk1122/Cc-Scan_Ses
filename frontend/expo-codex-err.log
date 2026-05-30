@@ -1,0 +1,25 @@
+warning ..\..\..\..\package.json: No license field
+"shadow*" style props are deprecated. Use "boxShadow".
+"shadow*" style props are deprecated. Use "boxShadow".
+"shadow*" style props are deprecated. Use "boxShadow".
+C:\Users\AdminR11k\Downloads\NUEVO-APK-main\NUEVO-APK-main\frontend\node_modules\@expo\cli\build\src\utils\errors.js:130
+    throw error;
+    ^
+
+Error: Cannot find module 'C:\Users\AdminR11k\Downloads\NUEVO-APK-main\NUEVO-APK-main\frontend\node_modules\@expo\metro\node_modules\metro\src\lib\formatBundlingError.js'
+    at createEsmNotFoundErr (node:internal/modules/cjs/loader:1537:15)
+    at finalizeEsmResolution (node:internal/modules/cjs/loader:1526:9)
+    at resolveExports (node:internal/modules/cjs/loader:707:14)
+    at Module._findPath (node:internal/modules/cjs/loader:774:31)
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1485:27)
+    at wrapResolveFilename (node:internal/modules/cjs/loader:1071:27)
+    at defaultResolveImplForCJSLoading (node:internal/modules/cjs/loader:1095:10)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1116:12)
+    at Module._load (node:internal/modules/cjs/loader:1285:25)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19) {
+  code: 'MODULE_NOT_FOUND',
+  path: 'C:\\Users\\AdminR11k\\Downloads\\NUEVO-APK-main\\NUEVO-APK-main\\frontend\\node_modules\\@expo\\metro\\node_modules\\metro'
+}
+
+Node.js v24.16.0
+error Command failed with exit code 7.

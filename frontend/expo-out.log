@@ -1,0 +1,36 @@
+env: load .env
+env: export EXPO_PUBLIC_BACKEND_URL
+Starting project at C:\Users\AdminR11k\Downloads\NUEVO-APK-main\NUEVO-APK-main\frontend
+Starting Metro Bundler
+warning: Bundler cache is empty, rebuilding (this may take a minute)
+Waiting on http://localhost:8081
+Logs for your project will appear below.
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Web node_modules\expo-router\entry.js ▓▓░░░░░░░░░░░░░░ 16.0% (21/61)
+λ node_modules\expo-router\node\render.js ▓░░░░░░░░░░░░░░░  8.5% ( 16/130)
+Web node_modules\expo-router\entry.js ▓▓░░░░░░░░░░░░░░ 16.0% ( 40/180)
+λ node_modules\expo-router\node\render.js ▓░░░░░░░░░░░░░░░  8.5% ( 74/269)
+Web node_modules\expo-router\entry.js ▓▓░░░░░░░░░░░░░░ 16.0% ( 89/255)
+λ node_modules\expo-router\node\render.js ▓▓░░░░░░░░░░░░░░ 16.1% (130/324)
+Web node_modules\expo-router\entry.js ▓▓▓░░░░░░░░░░░░░ 24.2% (179/364)
+λ node_modules\expo-router\node\render.js ▓▓▓░░░░░░░░░░░░░ 19.1% (153/350)
+Web node_modules\expo-router\entry.js ▓▓▓░░░░░░░░░░░░░ 24.2% (179/364)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓░░░░░░░░░ 44.4% (320/480)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓░░░░░░░░░ 43.9% (326/492)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓░░░░░░░░░ 44.7% (323/483)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓░░░░░░░░░ 47.6% (367/532)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 60.6% (449/577)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓░░░░░░░░░ 49.0% (418/597)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓░░░░░░ 64.8% (492/611)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 59.0% (487/634)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓░░░░░░ 65.4% (494/611)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓░░░░░░ 64.7% (533/668)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓░░░░░░ 68.2% (565/684)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 84.5% (683/743)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 88.1% (720/767)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 95.3% (853/874)
+λ node_modules\expo-router\node\render.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 93.4% (840/869)
+λ Bundled 43865ms node_modules\expo-router\node\render.js (895 modules)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (882/882)
+Web Bundled 50630ms node_modules\expo-router\entry.js (882 modules)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (882/882)

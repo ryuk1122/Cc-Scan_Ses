@@ -1,0 +1,23 @@
+yarn run v1.22.22
+$ expo start --port 8082
+env: load .env
+env: export EXPO_PUBLIC_BACKEND_URL
+Starting project at C:\Users\AdminR11k\Downloads\NUEVO-APK-main\NUEVO-APK-main\frontend
+Starting Metro Bundler
+Waiting on http://localhost:8082
+Logs for your project will appear below.
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+λ Bundled 3144ms node_modules\expo-router\node\render.js (903 modules)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (890/890)
+Web Bundled 6245ms node_modules\expo-router\entry.js (890 modules)
+Web node_modules\expo-router\entry.js ▓▓▓▓░░░░░░░░░░░░ 25.0% ( 33/144)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓░░░░░░░░░░ 43.7% (311/474)
+Web node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 60.1% (531/685)
+Web Bundled 11230ms node_modules\expo-router\entry.js (891 modules)
+ LOG  [web] Logs will appear in the browser console
+Web node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+λ Bundled 54ms node_modules\expo-router\node\render.js (1 module)
+Web Bundled 478ms node_modules\expo-router\entry.js (1 module)
+λ Bundled 28ms node_modules\expo-router\node\render.js (1 module)
+Web Bundled 334ms node_modules\expo-router\entry.js (1 module)
+info Visit https://yarnpkg.com/en/docs/cli/run for documentation about this command.

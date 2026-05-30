@@ -1,0 +1,157 @@
+{
+  "project_metadata": {
+    "name": "CedulaScan Pro",
+    "domain": "Event Operations & Identity Verification",
+    "theme_mode": "DARK",
+    "archetype": "Archetype 2: Performance Pro (Adapted for Data Integrity)",
+    "description": "Professional React Native Expo mobile app for real-time Colombian ID (cedula) scanning. Emphasizes speed, zero-duplication guarantees, and high-contrast data visualization."
+  },
+  "colors": {
+    "background": {
+      "default": "#0A0A0A",
+      "surface": "#141414",
+      "surface_elevated": "#1F1F1F"
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "disabled": "#52525B"
+    },
+    "borders": {
+      "default": "#27272A",
+      "focus": "#007AFF"
+    },
+    "status": {
+      "success": {
+        "color": "#00C853",
+        "bg": "rgba(0, 200, 83, 0.15)",
+        "border": "rgba(0, 200, 83, 0.5)"
+      },
+      "error": {
+        "color": "#FF3B30",
+        "bg": "rgba(255, 59, 48, 0.15)",
+        "border": "rgba(255, 59, 48, 0.5)"
+      },
+      "warning": {
+        "color": "#FFCC00",
+        "bg": "rgba(255, 204, 0, 0.15)"
+      },
+      "info": {
+        "color": "#007AFF"
+      }
+    }
+  },
+  "typography": {
+    "font_family": "System (San Francisco on iOS, Roboto on Android) or Inter if using custom fonts",
+    "hierarchy": {
+      "h1": "text-4xl font-black tracking-tighter text-white",
+      "h2": "text-2xl font-bold tracking-tight text-white",
+      "h3": "text-xl font-semibold text-white",
+      "body": "text-base font-normal text-zinc-300",
+      "caption": "text-sm font-medium text-zinc-500",
+      "data_metric": "text-5xl font-black tracking-tighter text-white",
+      "data_label": "text-xs font-bold uppercase tracking-[0.2em] text-zinc-500"
+    }
+  },
+  "layout_spacing": {
+    "safe_area_padding": "px-4 pt-4 pb-8",
+    "component_gap": "gap-4",
+    "section_gap": "gap-8",
+    "border_radius": {
+      "small": "rounded-md",
+      "medium": "rounded-xl",
+      "large": "rounded-2xl",
+      "pill": "rounded-full"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#007AFF] text-white rounded-xl py-4 px-6 font-bold flex flex-row justify-center items-center active:opacity-80",
+      "danger": "bg-[#FF3B30] text-white rounded-xl py-4 px-6 font-bold flex flex-row justify-center items-center",
+      "secondary": "bg-transparent border border-zinc-700 text-white rounded-xl py-4 px-6 font-bold"
+    },
+    "cards": {
+      "dashboard_stat": "bg-[#141414] border border-zinc-800 rounded-2xl p-6 flex flex-col justify-between"
+    },
+    "inputs": {
+      "text": "bg-[#141414] border border-zinc-800 rounded-xl px-4 py-4 text-white font-medium focus:border-[#007AFF]"
+    },
+    "scanner": {
+      "reticle": "border-2 border-[#00C853] w-3/4 aspect-video rounded-xl",
+      "overlay": "bg-black/70 absolute inset-0"
+    }
+  },
+  "screens": {
+    "Login": {
+      "layout": "Centered content over dark abstract background image",
+      "elements": ["Logo", "Email Input", "Password Input", "Login Button"],
+      "testing_attributes": ["login-email-input", "login-password-input", "login-submit-button"]
+    },
+    "EventSelection": {
+      "layout": "SafeAreaView with ScrollView list of events",
+      "elements": ["Header 'Seleccionar Evento'", "Event Cards (Name, Date, Location)"],
+      "testing_attributes": ["event-list", "event-card-item"]
+    },
+    "Scanner": {
+      "layout": "Full-screen camera view with bottom sheet for manual entry/recent scans",
+      "elements": [
+        "Camera Viewfinder",
+        "PDF417 Targeting Reticle",
+        "Top Bar (Event Name, Sync Status Indicator, Device Active Count)",
+        "Real-time Scan Counter (Big bold number)",
+        "Toggle for Manual Entry",
+        "Recent Scans Mini-list (Bottom Sheet)"
+      ],
+      "testing_attributes": ["scanner-camera-view", "manual-entry-toggle", "scan-counter", "sync-status-indicator"]
+    },
+    "Dashboard": {
+      "layout": "Grid-style dashboard using ScrollView",
+      "elements": [
+        "Total Registered Metric",
+        "Today's Count Metric",
+        "Duplicates Blocked (Red accent)",
+        "Active Devices List",
+        "Connection Status Panel"
+      ],
+      "testing_attributes": ["dashboard-total-metric", "dashboard-duplicates-metric", "dashboard-active-devices"]
+    },
+    "AuditLog": {
+      "layout": "FlatList with dense list items",
+      "elements": ["Search/Filter bar", "Scan Item (Cedula, Timestamp, Device ID, Status (Success/Duplicate))"],
+      "testing_attributes": ["audit-log-list", "audit-log-item"]
+    }
+  },
+  "interactions": {
+    "scan_feedback": {
+      "success": "Haptic feedback (Success), Toast 'Cédula Registrada' (Green background)",
+      "duplicate": "Haptic feedback (Heavy/Error), Screen flashes red edges, Toast '¡Cédula Duplicada! Registrada hace Xs' (Red background)"
+    },
+    "offline_mode": {
+      "indicator": "Top bar sync icon turns Amber/Red, shows 'Modo Offline - X en cola'",
+      "sync_action": "Auto-syncs when WebSocket reconnects, shows spinning sync icon"
+    }
+  },
+  "image_urls": {
+    "login_background": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/7545b093-475f-4fc0-a436-dbaf379f8c8a/images/207a1c21c353563a0c2100e962757b2e1e2a8c511c12f65a5734c178689ee046.png",
+      "description": "Abstract dark mode data visualization background used for the login screen."
+    },
+    "event_thumbnail_1": {
+      "url": "https://images.unsplash.com/photo-1470229722913-7c0e2dbbafd3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwyfHxldmVudCUyMGNvbmNlcnQlMjBjcm93ZCUyMGRhcmt8ZW58MHx8fHwxNzc5NzMwMjcyfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Concert crowd reference image for event list placeholders."
+    },
+    "event_thumbnail_2": {
+      "url": "https://images.unsplash.com/photo-1459749411175-04bf5292ceea?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwxfHxldmVudCUyMGNvbmNlcnQlMjBjcm93ZCUyMGRhcmt8ZW58MHx8fHwxNzc5NzMwMjcyfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Concert crowd reference image for event list placeholders."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Use standard React Native components (View, Text, TouchableOpacity, SafeAreaView, ScrollView, FlatList) combined with Tailwind classes via NativeWind (or standard StyleSheet mapping).",
+    "DO NOT use web-only HTML elements (div, span, etc.).",
+    "Implement real-time WebSocket connection to the FastAPI backend for immediate sync and duplicate detection.",
+    "The camera scanner must use expo-camera and be configured to scan PDF417 barcodes specifically, as this is the standard for Colombian Cedulas.",
+    "Implement an offline queue using AsyncStorage or SQLite that pushes pending scans to the backend when the WebSocket reconnects.",
+    "Always provide immediate haptic feedback and clear visual cues (Green vs Red) on the scanner screen.",
+    "Ensure all interactive components include the specified `data-testid` attributes."
+  ]
+}
