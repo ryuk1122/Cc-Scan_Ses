@@ -22,9 +22,15 @@ import platform
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 from cedula_parser import parse_pdf417, parse_mrz_from_text
+
+try:
+    from gemini_service import analyze_cedula_with_gemini, should_use_gemini
+except ImportError:  # pragma: no cover
+    analyze_cedula_with_gemini = None  # type: ignore
+    should_use_gemini = None  # type: ignore
 
 try:
     from PIL import Image, ImageOps, ImageFilter, ImageEnhance
@@ -342,10 +348,26 @@ def _preprocess_cv_clahe(img: "Image.Image") -> "Image.Image":
     return Image.fromarray(adaptive)
 
 
+def _preprocess_ocrb_nueva(img: "Image.Image") -> "Image.Image":
+    """Pipeline para fuente OCR-B grande de cedulas nuevas 2022+."""
+    img = _to_gray(img)
+    target_w = 3000
+    if img.width < target_w:
+        scale = target_w / max(img.width, 1)
+        img = img.resize((target_w, max(1, int(img.height * scale))), Image.LANCZOS)
+    img = ImageOps.autocontrast(img, cutoff=0)
+    img = ImageEnhance.Sharpness(img).enhance(4.0)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    threshold = _otsu_threshold(img)
+    img = img.point(lambda x: 0 if x < threshold else 255, "L")
+    return img
+
+
 _PREPROCESS_PIPELINES = [
+    _preprocess_ocrb_nueva,      # Primero: cedulas nuevas 2022+ (OCR-B grande)
     _preprocess_standard,
     _preprocess_cv_clahe,
-    _preprocess_otsu_adaptive,   # Nuevo: mejor para cédulas amarillas
+    _preprocess_otsu_adaptive,
     _preprocess_adaptive,
     _preprocess_dark,
     _preprocess_enhanced,
@@ -535,10 +557,158 @@ def ocr_cedula(image_bytes: bytes) -> dict:
     }
 
 
+_MRZ_TESS_CONFIGS = [
+    # Whitelist ampliado: incluye > (filler cédulas nuevas) y espacio
+    "--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<> -c preserve_interword_spaces=1",
+    "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<>",
+    "--oem 3 --psm 11 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<>",
+    # Sin whitelist: para cédulas nuevas con caracteres inesperados
+    "--oem 3 --psm 6",
+    "--oem 1 --psm 6",
+]
+
+
+def _mrz_crop_candidates(img: "Image.Image") -> List["Image.Image"]:
+    base = ImageOps.exif_transpose(img).convert("RGB")
+    crops: List["Image.Image"] = []
+    seen: set[tuple[int, int, int, int, int]] = set()
+    for angle in (0, 90, 180, 270):
+        rotated = base if angle == 0 else base.rotate(angle, expand=True)
+        w, h = rotated.size
+        boxes = [
+            # Cédulas nuevas 2022+: MRZ en mitad inferior visible
+            (0, int(h * 0.55), w, h),
+            (0, int(h * 0.50), w, int(h * 0.98)),
+            # Cédulas antiguas: MRZ más arriba
+            (0, int(h * 0.42), w, h),
+            (int(w * 0.03), int(h * 0.52), int(w * 0.97), int(h * 0.98)),
+            # Fallback imagen completa
+            (0, 0, w, h),
+            # Extra: solo zona baja absoluta (cédulas con MRZ muy al fondo)
+            (0, int(h * 0.62), w, h),
+        ]
+        for box in boxes:
+            left, top, right, bottom = box
+            if right - left < 180 or bottom - top < 60:
+                continue
+            key = (angle, left, top, right, bottom)
+            if key in seen:
+                continue
+            seen.add(key)
+            crops.append(rotated.crop(box))
+    return crops
+
+
+def _preprocess_mrz(img: "Image.Image") -> List["Image.Image"]:
+    gray = _to_gray(img)
+    target_width = 2200
+    if gray.width < target_width:
+        scale = target_width / max(gray.width, 1)
+        gray = gray.resize((target_width, max(1, int(gray.height * scale))), Image.LANCZOS)
+    gray = ImageOps.autocontrast(gray, cutoff=2)
+    gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    sharp = ImageEnhance.Sharpness(gray).enhance(2.5)
+    high = ImageEnhance.Contrast(sharp).enhance(2.4)
+    threshold = _otsu_threshold(high)
+    binary = high.point(lambda x: 0 if x < threshold else 255, "1").convert("L")
+    variants = [gray, sharp, high, binary, ImageOps.invert(binary)]
+
+    if cv2 is not None and np is not None:
+        arr = np.array(gray)
+        clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(arr)
+        adaptive = cv2.adaptiveThreshold(
+            clahe,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            35,
+            9,
+        )
+        variants.extend([Image.fromarray(clahe), Image.fromarray(adaptive), ImageOps.invert(Image.fromarray(adaptive))])
+
+    return variants
+
+
+def _run_mrz_tesseract(img: "Image.Image", config: str) -> str:
+    try:
+        return pytesseract.image_to_string(img, lang="eng", config=config) or ""
+    except Exception:
+        return ""
+
+
+def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
+    if not _PIL_OK:
+        return {
+            "ok": False,
+            "error": "Pillow / pytesseract no instalados",
+            "cedula": "",
+            "texto_completo": "",
+            "parsed": {},
+        }
+
+    try:
+        original = Image.open(io.BytesIO(image_bytes))
+        original.load()
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"No se pudo abrir la imagen: {e}",
+            "cedula": "",
+            "texto_completo": "",
+            "parsed": {},
+        }
+
+    all_texts: List[str] = []
+    for crop in _mrz_crop_candidates(original):
+        for proc_img in _preprocess_mrz(crop):
+            for config in _MRZ_TESS_CONFIGS:
+                text = _run_mrz_tesseract(proc_img, config)
+                if not text:
+                    continue
+                all_texts.append(text)
+                parsed = parse_mrz_from_text(text)
+                if parsed.get("cedula"):
+                    return {
+                        "ok": True,
+                        "cedula": parsed.get("cedula") or "",
+                        "texto_completo": text,
+                        "parsed": parsed,
+                        "raw_mrz": parsed.get("raw_mrz") or [],
+                        "mrz_valido": bool(parsed.get("mrz_valido")),
+                    }
+
+    combined = "\n".join(all_texts)
+    parsed = parse_mrz_from_text(combined)
+    if parsed.get("cedula"):
+        return {
+            "ok": True,
+            "cedula": parsed.get("cedula") or "",
+            "texto_completo": combined,
+            "parsed": parsed,
+            "raw_mrz": parsed.get("raw_mrz") or [],
+            "mrz_valido": bool(parsed.get("mrz_valido")),
+        }
+
+    return {
+        "ok": False,
+        "error": "No se detecto MRZ TD1 legible",
+        "cedula": "",
+        "texto_completo": combined[:1200],
+        "parsed": parsed,
+        "raw_mrz": [],
+        "mrz_valido": False,
+    }
+
+
 async def ocr_cedula_async(image_bytes: bytes) -> dict:
     """Versión async-safe. No bloquea el event loop de FastAPI."""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, ocr_cedula, image_bytes)
+
+
+async def ocr_mrz_cedula_async(image_bytes: bytes) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, ocr_mrz_cedula, image_bytes)
 
 
 def ocr_from_base64(data_uri_or_b64: str) -> dict:
@@ -574,4 +744,48 @@ async def ocr_from_base64_async(data_uri_or_b64: str) -> dict:
         img_bytes = base64.b64decode(s + "==", validate=False)
     except Exception as e:
         return {"ok": False, "error": f"Base64 inválido: {e}", "cedula": "", "texto_completo": ""}
-    return await ocr_cedula_async(img_bytes)
+    local_result = await ocr_cedula_async(img_bytes)
+    if should_use_gemini and analyze_cedula_with_gemini and should_use_gemini(local_result):
+        loop = asyncio.get_event_loop()
+        gemini_result = await loop.run_in_executor(None, analyze_cedula_with_gemini, img_bytes)
+        if gemini_result.get("cedula"):
+            local_parsed = local_result.get("parsed") or {}
+            gemini_parsed = gemini_result.get("parsed") or {}
+            merged_parsed = dict(gemini_parsed)
+            for key, value in local_parsed.items():
+                if value:
+                    merged_parsed[key] = value
+            cedula = local_result.get("cedula") or gemini_result.get("cedula") or ""
+            return {
+                **local_result,
+                "ok": True,
+                "cedula": cedula,
+                "texto_completo": local_result.get("texto_completo") or gemini_result.get("texto_completo") or "",
+                "pipeline_usado": (
+                    f"{local_result.get('pipeline_usado') or 'ocr_local'}+gemini"
+                    if local_result.get("cedula")
+                    else "gemini_vision"
+                ),
+                "parsed": merged_parsed,
+                "gemini": gemini_result.get("gemini") or {},
+            }
+        if not local_result.get("cedula"):
+            return {
+                **local_result,
+                "gemini": gemini_result.get("gemini") or {},
+                "error": gemini_result.get("error") or local_result.get("error", ""),
+            }
+    return local_result
+
+
+async def ocr_mrz_from_base64_async(data_uri_or_b64: str) -> dict:
+    if not data_uri_or_b64:
+        return {"ok": False, "error": "Imagen vacia", "cedula": "", "texto_completo": ""}
+    s = data_uri_or_b64.strip()
+    if "," in s and s.startswith("data:"):
+        s = s.split(",", 1)[1]
+    try:
+        img_bytes = base64.b64decode(s + "==", validate=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Base64 invalido: {e}", "cedula": "", "texto_completo": ""}
+    return await ocr_mrz_cedula_async(img_bytes)

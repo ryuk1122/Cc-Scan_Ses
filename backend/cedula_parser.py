@@ -42,6 +42,7 @@ Correcciones v5 (BUG #4):
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
 # ─── Rangos válidos ───────────────────────────────────────────────────────────
@@ -99,6 +100,23 @@ MRZ_LINE_RE = re.compile(r"^[A-Z0-9<]{24,32}$")
 MRZ_CHAR_VALUES = {"<": 0, **{str(i): i for i in range(10)}}
 MRZ_CHAR_VALUES.update({chr(ord("A") + i): 10 + i for i in range(26)})
 MRZ_WEIGHTS = (7, 3, 1)
+MRZ_FILLER_CHARS = str.maketrans({
+    "«": "<",
+    "‹": "<",
+    "›": "<",
+    ">": "<",
+    " ": "",
+})
+MRZ_DIGIT_FIXES = str.maketrans({
+    "O": "0",
+    "Q": "0",
+    "D": "0",
+    "I": "1",
+    "L": "1",
+    "B": "8",
+    "S": "5",
+    "Z": "2",
+})
 
 # ─── BUG #4 FIX: Regex de etiqueta ampliado ──────────────────────────────────
 # Antes solo buscaba: NÚMERO, N°, CEDULA, CC
@@ -128,6 +146,11 @@ STANDALONE_NUMBER_RE = re.compile(
 
 # Número con puntos de agrupación: 1.005.029.331
 GROUPED_NUMBER_RE = re.compile(r"\d{1,3}(?:[.,]\d{3}){1,3}")
+KEY_VALUE_ID_RE = re.compile(
+    r"(?:NUIP|DOCUMENTO|DOCUMENT_NUMBER|CEDULA|C[EÉ]DULA|IDENTIFICACION|IDENTIFICACI[OÓ]N)"
+    r'["\']?\s*[:=]\s*["\']?([0-9][0-9\s.,]{4,18}[0-9])',
+    re.IGNORECASE,
+)
 
 PDF417_MARKER = b"PubDSK_"
 PDF417_ENCODING = "latin-1"
@@ -178,11 +201,15 @@ def _strip_zeros(s: str) -> Optional[str]:
     return stripped
 
 
-def _format_mrz_date(yymmdd: str) -> str:
+def _format_mrz_date(yymmdd: str, *, future: bool = False) -> str:
     if not re.fullmatch(r"\d{6}", yymmdd or ""):
         return ""
     yy = int(yymmdd[:2])
-    yyyy = 1900 + yy if yy > 30 else 2000 + yy
+    if future:
+        yyyy = 2000 + yy
+    else:
+        current_yy = int(str(datetime.now().year)[2:4])
+        yyyy = 1900 + yy if yy > current_yy else 2000 + yy
     return f"{yyyy:04d}-{yymmdd[2:4]}-{yymmdd[4:6]}"
 
 
@@ -197,20 +224,50 @@ def validate_mrz_field(value: str, check_digit: str) -> bool:
     return bool(check_digit and check_digit.isdigit() and mrz_check_digit(value) == int(check_digit))
 
 
+def _clean_mrz_candidate(line: str) -> str:
+    compact = re.sub(r"[^A-Z0-9<]", "", (line or "").upper().translate(MRZ_FILLER_CHARS))
+    if compact.startswith("ID<COL"):
+        compact = "IDCOL" + compact[6:]
+    if compact.startswith("IC<COL"):
+        compact = "ICCOL" + compact[6:]
+    if compact.startswith("1D"):
+        compact = "ID" + compact[2:]
+    if compact.startswith("1C"):
+        compact = "IC" + compact[2:]
+    if len(compact) >= 5:
+        head = compact[:5]
+        normalized_head = head.replace("0", "O")
+        # Cédulas antiguas: IDCOL
+        if normalized_head.startswith("IDCO") and normalized_head[4] in ("1", "I", "L"):
+            normalized_head = "IDCOL"
+        if normalized_head == "IDCOL":
+            compact = "IDCOL" + compact[5:]
+        # Cédulas nuevas 2022+: ICCOL
+        elif normalized_head.startswith("ICCO") and normalized_head[4] in ("1", "I", "L"):
+            compact = "ICCOL" + compact[5:]
+    return compact
+
+
+def _fix_mrz_digits(value: str) -> str:
+    return (value or "").upper().translate(MRZ_DIGIT_FIXES)
+
+
 def _candidate_mrz_lines(raw: str) -> List[str]:
     lines: List[str] = []
     for line in re.split(r"[\r\n]+", (raw or "").upper()):
-        compact = re.sub(r"[^A-Z0-9<]", "", line)
+        compact = _clean_mrz_candidate(line)
         if MRZ_LINE_RE.match(compact):
             lines.append(compact[:30].ljust(30, "<"))
     if len(lines) >= 3:
         return lines[:3]
 
-    compact = re.sub(r"[^A-Z0-9<]", "", (raw or "").upper())
-    start = compact.find("IDCOL")
-    if start >= 0 and len(compact) - start >= 85:
-        chunk = compact[start:start + 90]
-        return [chunk[0:30].ljust(30, "<"), chunk[30:60].ljust(30, "<"), chunk[60:90].ljust(30, "<")]
+    compact = _clean_mrz_candidate(raw)
+    # Buscar IDCOL (cédulas antiguas) o ICCOL (cédulas nuevas 2022+)
+    for prefix in ("IDCOL", "ICCOL"):
+        start = compact.find(prefix)
+        if start >= 0 and len(compact) - start >= 85:
+            chunk = compact[start:start + 90]
+            return [chunk[0:30].ljust(30, "<"), chunk[30:60].ljust(30, "<"), chunk[60:90].ljust(30, "<")]
     return []
 
 
@@ -235,33 +292,81 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
         return out
 
     l1, l2, l3 = lines[:3]
-    if not l1.startswith("IDCOL"):
+    # Aceptar IDCOL (cédulas antiguas) e ICCOL (cédulas nuevas 2022+)
+    mrz_prefix = ""
+    if l1.startswith("IDCOL"):
+        mrz_prefix = "IDCOL"
+    elif l1.startswith("ICCOL"):
+        mrz_prefix = "ICCOL"
+    else:
         return out
 
-    doc_match = re.match(r"^IDCOL(\d{5,11})<?(\d)", l1)
+    l1_numeric = l1[:5] + _fix_mrz_digits(l1[5:])
+    # TD1: posiciones 5-13 = 9 chars del numero, posicion 14 = check digit
+    # Para cedulas de 10 digitos, el decimo digito puede estar en pos 15
+    doc_field_raw = _fix_mrz_digits(l1[5:14])   # 9 chars
+    doc_check_raw = _fix_mrz_digits(l1[14:15])  # 1 char check digit
+    # Verificar si el numero desborda al campo opcional (pos 15) - cedulas 10 digitos
+    extra_char = _fix_mrz_digits(l1[15:16]) if len(l1) > 15 else ""
+    doc_field = doc_field_raw
+    doc_check = doc_check_raw
+
+    # Intentar con regex primero (puede capturar numeros cortos directamente)
+    doc_match = re.match(r"^(?:IDCOL|ICCOL)(\d{5,9})([0-9])", l1_numeric)
     if doc_match:
-        doc_field = doc_match.group(1)
-        doc_check = doc_match.group(2)
-    else:
-        doc_field = l1[5:14]
-        doc_check = l1[14]
+        candidate = doc_match.group(1)
+        possible_check = doc_match.group(2)
+        # Validar con check digit
+        if validate_mrz_field(candidate, possible_check):
+            doc_field = candidate
+            doc_check = possible_check
+        elif extra_char.isdigit():
+            # Puede ser que el numero tenga 10 digitos (9 en campo + 1 overflow)
+            candidate10 = candidate + possible_check
+            check10 = extra_char
+            if validate_mrz_field(candidate10, check10):
+                doc_field = candidate10
+                doc_check = check10
+            else:
+                doc_field = doc_field_raw
+                doc_check = doc_check_raw
+
     cedula = doc_field.replace("<", "").lstrip("0")
-    birth = l2[0:6]
-    birth_check = l2[6]
+
+    # Colombia (ICCOL/IDCOL) pone el numero COMPLETO en el campo opcional de L2
+    # posiciones 18-28 de L2. Si ahi hay un numero mas largo, ese es el real.
+    l2_opcional = l2[18:29].replace("<", "").strip()
+    l2_opcional_fixed = _fix_mrz_digits(l2_opcional)
+    if (l2_opcional_fixed.isdigit()
+            and len(l2_opcional_fixed) > len(cedula)
+            and 7 <= len(l2_opcional_fixed) <= 11):
+        cedula = l2_opcional_fixed.lstrip("0") or l2_opcional_fixed
+    birth = _fix_mrz_digits(l2[0:6])
+    birth_check = _fix_mrz_digits(l2[6])[:1]
     gender = l2[7]
-    expiry = l2[8:14]
-    expiry_check = l2[14]
-    nationality = l2[15:18]
+    expiry = _fix_mrz_digits(l2[8:14])
+    expiry_check = _fix_mrz_digits(l2[14])[:1]
+    nationality = l2[15:18].upper().replace("0", "O").replace("1", "I")
 
-    name_parts = [p for p in l3.replace("0", "O").split("<") if p]
-    if name_parts:
-        out["primer_apellido"] = name_parts[0]
-    if len(name_parts) > 1:
-        out["segundo_apellido"] = name_parts[1]
-    if len(name_parts) > 2:
-        out["nombres"] = " ".join(name_parts[2:])
+    name_line = l3.replace("0", "O").rstrip("<")
+    if "<<" in name_line:
+        last_block, first_block = name_line.split("<<", 1)
+        last_parts = [p for p in last_block.split("<") if p]
+        first_parts = [p for p in first_block.split("<") if p]
+        out["primer_apellido"] = last_parts[0] if last_parts else ""
+        out["segundo_apellido"] = " ".join(last_parts[1:])
+        out["nombres"] = " ".join(first_parts)
+    else:
+        name_parts = [p for p in name_line.split("<") if p]
+        if name_parts:
+            out["primer_apellido"] = name_parts[0]
+        if len(name_parts) > 1:
+            out["segundo_apellido"] = name_parts[1]
+        if len(name_parts) > 2:
+            out["nombres"] = " ".join(name_parts[2:])
 
-    doc_ok = validate_mrz_field(doc_field, doc_check)
+    doc_validation_field = doc_field.lstrip("0") or doc_field
+    doc_ok = validate_mrz_field(doc_validation_field, doc_check)
     birth_ok = validate_mrz_field(birth, birth_check)
     expiry_ok = validate_mrz_field(expiry, expiry_check)
 
@@ -269,7 +374,7 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
         "cedula": cedula,
         "genero": gender if gender in ("M", "F") else "",
         "fecha_nacimiento": _format_mrz_date(birth),
-        "fecha_expiracion": _format_mrz_date(expiry),
+        "fecha_expiracion": _format_mrz_date(expiry, future=True),
         "nacionalidad": nationality,
         "mrz_valido": doc_ok and birth_ok and expiry_ok,
         "raw_mrz": lines[:3],
@@ -577,6 +682,13 @@ def extract_cedula(raw: Optional[str]) -> Optional[str]:
             return _strip_zeros(digits) or digits
 
     # ── PRIORIDAD 4: BUG #4 FIX — Etiqueta explícita (ampliada) ────────────
+    km = KEY_VALUE_ID_RE.search(s)
+    if km:
+        raw_num = _normalize_num(km.group(1))
+        if raw_num.isdigit() and _MIN_DIGITS <= len(raw_num) <= _MAX_DIGITS:
+            if not _is_date(raw_num) and not _is_year(raw_num):
+                return raw_num.lstrip("0") or raw_num
+
     lm = NUMBER_LABEL_RE.search(s)
     if lm:
         raw_num = _normalize_num(lm.group(1))

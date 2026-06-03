@@ -32,7 +32,8 @@ import jwt
 
 from cedula_parser import clean_cedula, extract_cedula, parse_pdf417
 from ocr_service import ocr_from_base64_async, ocr_dependency_status
-from barcode_service import decode_barcode_from_base64, barcode_dependency_status
+from barcode_service import decode_identity_document_from_base64, barcode_dependency_status
+from gemini_service import gemini_dependency_status
 
 # ---------- Config & init ----------
 ROOT_DIR = Path(__file__).parent
@@ -56,13 +57,14 @@ JWT_SECRET  = require_env("JWT_SECRET_KEY")
 JWT_ALGO    = os.environ.get("JWT_ALGORITHM", "HS256")
 TOKEN_HOURS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_HOURS", "12"))
 CORS_ORIGINS = parse_csv_env("CORS_ORIGINS", "*")
+BCRYPT_ROUNDS = int(os.environ.get("BCRYPT_ROUNDS", "10"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cedulascan")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db     = client[DB_NAME]
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=BCRYPT_ROUNDS)
 
 
 # ---------- Pydantic models ----------
@@ -117,6 +119,7 @@ class EscanearRequest(BaseModel):
     nombres: Optional[str] = ""
     genero: Optional[str] = ""
     fecha_nacimiento: Optional[str] = ""
+    fecha_expiracion: Optional[str] = ""
     tipo_sangre: Optional[str] = ""
 
 
@@ -153,6 +156,23 @@ def verify_password(pw: str, h: str) -> bool:
         return pwd_ctx.verify(pw, h)
     except Exception:
         return False
+
+
+def password_needs_update(h: str) -> bool:
+    try:
+        return pwd_ctx.needs_update(h)
+    except Exception:
+        return False
+
+
+async def update_password_hash(user_id: str, password: str) -> None:
+    try:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"password_hash": hash_password(password)}},
+        )
+    except Exception as exc:
+        logger.warning("No se pudo actualizar el hash de password: %s", exc)
 
 
 def create_token(user_id: str, email: str, role: str) -> str:
@@ -426,6 +446,8 @@ async def login(body: UserLogin):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    if password_needs_update(user["password_hash"]):
+        asyncio.create_task(update_password_hash(user["id"], body.password))
     token = create_token(user["id"], user["email"], user.get("role", "operator"))
     return TokenResponse(
         access_token=token,
@@ -473,6 +495,95 @@ async def list_afiliados(q: str = "", limit: int = 50, skip: int = 0, current=De
 async def afiliados_stats(current=Depends(require_admin)):
     total = await db.afiliados.count_documents({})
     return {"total": total}
+
+
+@api.get("/admin/metrics")
+async def admin_metrics(evento_id: str = "", current=Depends(require_admin)):
+    event_filter: Dict[str, Any] = {"evento_id": evento_id} if evento_id else {}
+    store_filter: Dict[str, Any] = {"aggregate_id": evento_id} if evento_id else {}
+    now = datetime.now(timezone.utc)
+    today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    today_ms = int(today_start.timestamp() * 1000)
+    last_24h_ms = int((now - timedelta(hours=24)).timestamp() * 1000)
+
+    total_afiliados, total_eventos, eventos_activos, total_registros, registros_evento, hoy, duplicados = await asyncio.gather(
+        db.afiliados.count_documents({}),
+        db.eventos.count_documents({}),
+        db.eventos.count_documents({"activo": True}),
+        db.registros.count_documents({}),
+        db.registros.count_documents(event_filter) if event_filter else db.registros.count_documents({}),
+        db.registros.count_documents({**event_filter, "timestamp": {"$gte": today_ms}}),
+        db.event_store.count_documents({**store_filter, "event_type": "DUPLICADO_RECHAZADO"}),
+    )
+
+    afiliados_evento = await db.registros.count_documents({**event_filter, "es_afiliado": True})
+    no_afiliados_evento = max(registros_evento - afiliados_evento, 0)
+    con_nombre = await db.registros.count_documents({**event_filter, "nombre": {"$ne": ""}})
+    con_fecha = await db.registros.count_documents({**event_filter, "fecha_nacimiento": {"$ne": ""}})
+    dispositivos_usados = len(await db.registros.distinct("device_id", event_filter))
+
+    async def aggregate_list(pipeline: List[Dict[str, Any]], limit: int = 8) -> List[Dict[str, Any]]:
+        rows = await db.registros.aggregate(pipeline).to_list(limit)
+        return rows
+
+    top_municipios = await aggregate_list([
+        {"$match": {**event_filter, "municipio": {"$nin": ["", None]}}},
+        {"$group": {"_id": "$municipio", "total": {"$sum": 1}}},
+        {"$sort": {"total": -1}},
+        {"$limit": 8},
+        {"$project": {"_id": 0, "label": "$_id", "total": 1}},
+    ])
+    top_operadores = await aggregate_list([
+        {"$match": {**event_filter, "operator_email": {"$nin": ["", None]}}},
+        {"$group": {"_id": "$operator_email", "total": {"$sum": 1}}},
+        {"$sort": {"total": -1}},
+        {"$limit": 8},
+        {"$project": {"_id": 0, "label": "$_id", "total": 1}},
+    ])
+    por_hora = await aggregate_list([
+        {"$match": {**event_filter, "timestamp": {"$gte": last_24h_ms}}},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%H:00", "date": {"$toDate": "$timestamp"}, "timezone": "America/Bogota"}},
+            "total": {"$sum": 1},
+        }},
+        {"$sort": {"_id": 1}},
+        {"$project": {"_id": 0, "label": "$_id", "total": 1}},
+    ], 24)
+
+    recientes = await db.registros.find(event_filter, {"_id": 0}).sort("created_at", -1).limit(8).to_list(8)
+    evento = await db.eventos.find_one({"id": evento_id}, {"_id": 0}) if evento_id else None
+    return {
+        "evento": evento,
+        "global": {
+            "afiliados": total_afiliados,
+            "eventos": total_eventos,
+            "eventos_activos": eventos_activos,
+            "registros": total_registros,
+        },
+        "evento_actual": {
+            "registros": registros_evento,
+            "hoy": hoy,
+            "afiliados": afiliados_evento,
+            "no_afiliados": no_afiliados_evento,
+            "duplicados": duplicados,
+            "dispositivos_usados": dispositivos_usados,
+            "dispositivos_activos": manager.active_count(evento_id) if evento_id else 0,
+            "con_nombre": con_nombre,
+            "con_fecha_nacimiento": con_fecha,
+            "calidad_nombre_pct": round((con_nombre / registros_evento) * 100, 1) if registros_evento else 0,
+            "calidad_fecha_pct": round((con_fecha / registros_evento) * 100, 1) if registros_evento else 0,
+        },
+        "top_municipios": top_municipios,
+        "top_operadores": top_operadores,
+        "por_hora": por_hora,
+        "recientes": recientes,
+        "ia": gemini_dependency_status(),
+    }
+
+
+@api.get("/admin/ia/status")
+async def admin_ia_status(current=Depends(require_admin)):
+    return {"gemini": gemini_dependency_status()}
 
 
 @api.post("/admin/afiliados/import")
@@ -941,6 +1052,7 @@ async def escanear(
             or (afiliado.get("fecha_nac") if afiliado else "")
             or ""
         ).strip(),
+        "fecha_expiracion": (body.fecha_expiracion or parsed.get("fecha_expiracion") or "").strip(),
         "tipo_sangre":  (body.tipo_sangre  or parsed.get("tipo_sangre") or "").strip(),
         "sede":         pref(body.sede     or "", "sede"),
         "municipio":    pref(body.municipio or "", "municipio"),
@@ -1020,9 +1132,12 @@ async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
         "ok":      bool(result.get("cedula")),
         "cedula":  result.get("cedula") or "",
         "texto":   (result.get("texto_completo") or "")[:300],
+        "texto_completo": result.get("texto_completo") or "",
+        "pipeline_usado": result.get("pipeline_usado") or "",
         "parsed":  parsed,
         "raw_mrz": parsed.get("raw_mrz") or [],
         "mrz_valido": bool(parsed.get("mrz_valido")),
+        "gemini": result.get("gemini") or {},
         "afiliado": afiliado,
         "error":   result.get("error", ""),
     }
@@ -1031,7 +1146,7 @@ async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
 @api.post("/barcode/cedula")
 async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)):
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, decode_barcode_from_base64, body.image_base64)
+    result = await loop.run_in_executor(None, decode_identity_document_from_base64, body.image_base64)
     afiliado = None
     if result.get("cedula"):
         afiliado = await db.afiliados.find_one({"cedula": result["cedula"]}, {"_id": 0})
@@ -1041,7 +1156,10 @@ async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)
         "raw": result.get("raw") or "",
         "parsed": result.get("parsed") or {},
         "format": result.get("format") or "",
+        "source": result.get("source") or "",
         "candidates": result.get("candidates") or [],
+        "raw_mrz": result.get("raw_mrz") or (result.get("parsed") or {}).get("raw_mrz") or [],
+        "mrz_valido": bool(result.get("mrz_valido") or (result.get("parsed") or {}).get("mrz_valido")),
         "afiliado": afiliado,
         "error": result.get("error", ""),
     }
@@ -1059,12 +1177,13 @@ async def health_dependencies():
         "ok": True,
         "ocr": ocr_dependency_status(),
         "barcode": barcode_dependency_status(),
+        "gemini": gemini_dependency_status(),
     }
 
 # ======================================================================
 # 🚀 ENDPOINT CRÍTICO: PROCESAMIENTO HÍBRIDO (TIEMPO REAL + RESPALDO)
 # ======================================================================
-@api.post("/ocr/cedula")
+@api.post("/ocr/cedula/hybrid-register")
 async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
     """
     Procesa escaneos de cédula. Soporta ráfaga rápida por texto plano (is_raw_string)
@@ -1113,7 +1232,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
             raise HTTPException(status_code=400, detail="No se proporcionó texto de barras ni imagen Base64")
             
         print("\n[BACKEND-📸] Procesando por respaldo de imagen...")
-        resultado_img = decode_barcode_from_base64(image_base64)
+        resultado_img = decode_identity_document_from_base64(image_base64)
         
         if not resultado_img.get("ok"):
             return {"ok": False, "error": resultado_img.get("error", "No se detectó el código PDF417")}
