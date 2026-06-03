@@ -74,6 +74,9 @@ export const api = {
   listAfiliados: (q = "", limit = 50, skip = 0) =>
     request<{ total: number; items: any[] }>(`/admin/afiliados?q=${encodeURIComponent(q)}&limit=${limit}&skip=${skip}`),
   afiliadosStats: () => request<{ total: number }>("/admin/afiliados/stats"),
+  adminMetrics: (eventoId?: string) =>
+    request<any>(`/admin/metrics${eventoId ? `?evento_id=${encodeURIComponent(eventoId)}` : ""}`),
+  adminIaStatus: () => request<any>("/admin/ia/status"),
   updateAfiliado: (cedula: string, body: any) =>
     request<any>(`/admin/afiliados/${encodeURIComponent(cedula)}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteAfiliado: (cedula: string) =>
@@ -90,12 +93,12 @@ export const api = {
 
   // OCR del frente
   ocrCedula: (imageBase64: string) =>
-    request<{ ok: boolean; cedula: string; texto: string; afiliado: any; parsed?: any; raw_mrz?: string[]; mrz_valido?: boolean; error?: string }>(
+    request<{ ok: boolean; cedula: string; texto_completo?: string; pipeline_usado?: string; gemini?: any; afiliado: any; parsed?: any; raw_mrz?: string[]; mrz_valido?: boolean; error?: string }>(
       "/ocr/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64 }) },
     ),
   barcodeCedula: (imageBase64: string) =>
-    request<{ ok: boolean; cedula: string; raw: string; parsed?: any; format?: string; candidates?: string[]; afiliado: any; error?: string }>(
+    request<{ ok: boolean; cedula: string; raw: string; parsed?: any; format?: string; source?: string; raw_mrz?: string[]; mrz_valido?: boolean; candidates?: string[]; afiliado: any; error?: string }>(
       "/barcode/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64 }) },
     ),
@@ -155,7 +158,7 @@ export const api = {
 export function wsUrl(eventoId: string, token: string, deviceId: string): string {
   if (!BASE) throw new Error("EXPO_PUBLIC_BACKEND_URL no está configurada");
   const httpBase = BASE.replace(/^http/, "ws");
-  return `${httpBase}/api/ws/eventos/${eventoId}?token=${encodeURIComponent(token)}&device_id=${encodeURIComponent(deviceId)}`;
+  return `${httpBase}/api/eventos/${eventoId}?token=${encodeURIComponent(token)}&device_id=${encodeURIComponent(deviceId)}`;
 }
 
 export { getToken };

@@ -29,8 +29,8 @@ export default function RootLayout() {
   return (
     <SessionProvider>
       <EventoProvider>
-        <StatusBar style="light" />
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#0A0A0A" } }} />
+        <StatusBar style="dark" />
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F4F4F1" } }} />
       </EventoProvider>
     </SessionProvider>
   );

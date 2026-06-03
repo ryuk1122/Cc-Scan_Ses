@@ -7,8 +7,7 @@ import { theme } from "@/src/theme";
 
 type TabIconProps = { color: string; size: number };
 
-const EventosIcon = ({ color, size }: TabIconProps) => <Ionicons name="calendar" size={size} color={color} />;
-const EscanearIcon = ({ color, size }: TabIconProps) => <Ionicons name="scan" size={size} color={color} />;
+const ScannerIcon = ({ color, size }: TabIconProps) => <Ionicons name="scan" size={size} color={color} />;
 const DashboardIcon = ({ color, size }: TabIconProps) => <Ionicons name="stats-chart" size={size} color={color} />;
 const AuditoriaIcon = ({ color, size }: TabIconProps) => <Ionicons name="document-text" size={size} color={color} />;
 const AdminIcon = ({ color, size }: TabIconProps) => <Ionicons name="shield-checkmark" size={size} color={color} />;
@@ -30,16 +29,21 @@ export default function AppLayout() {
           backgroundColor: theme.surface,
           borderTopColor: theme.border,
           borderTopWidth: 1,
-          height: 70,
-          paddingBottom: 10,
-          paddingTop: 8,
+          height: 62,
+          paddingBottom: 7,
+          paddingTop: 7,
+          elevation: 12,
+          shadowColor: "#000",
+          shadowOpacity: 0.08,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: -3 },
         },
-        tabBarLabelStyle: { fontSize: 10, fontWeight: "600" },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: "700" },
       }}
     >
-      <Tabs.Screen name="eventos" options={{ title: "Eventos", tabBarIcon: EventosIcon }} />
-      <Tabs.Screen name="escanear" options={{ title: "Escanear", tabBarIcon: EscanearIcon }} />
-      <Tabs.Screen name="dashboard" options={{ title: "Dashboard", tabBarIcon: DashboardIcon }} />
+      <Tabs.Screen name="eventos" options={{ title: "Escaner", tabBarIcon: ScannerIcon }} />
+      <Tabs.Screen name="escanear" options={{ href: null }} />
+      <Tabs.Screen name="dashboard" options={{ title: "Panel", tabBarIcon: DashboardIcon }} />
       <Tabs.Screen name="auditoria" options={{ title: "Auditoría", tabBarIcon: AuditoriaIcon }} />
       <Tabs.Screen
         name="admin"

@@ -87,4 +87,4 @@ export class Storage extends StorageBase {
 export const storage = new Storage();
 
 // Compile-time guard: any new method must be declared in storage-base.ts first.
-type _NoExtras = AssertNoExtras<Exclude<keyof Storage, keyof StorageBase>>;
+export type StorageContractNoExtras = AssertNoExtras<Exclude<keyof Storage, keyof StorageBase>>;

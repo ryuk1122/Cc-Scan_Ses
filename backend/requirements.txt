@@ -11,11 +11,11 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 openpyxl==3.1.5
 xlsxwriter==3.2.9
-pillow==12.2.0
+pillow==10.4.0
 pytesseract==0.3.13
-numpy==2.3.5
-opencv-python-headless==4.11.0.86
-zxing-cpp==2.3.0
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+zxing-cpp==2.2.0
 requests==2.34.2
 websockets==16.0
-pytest==9.0.3
+

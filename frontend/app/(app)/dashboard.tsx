@@ -27,7 +27,7 @@ export default function DashboardScreen() {
     try {
       const r = await api.estado(eventoId);
       setEstado(r);
-    } catch (e) {
+    } catch {
       // ignore
     }
   }, [eventoId]);

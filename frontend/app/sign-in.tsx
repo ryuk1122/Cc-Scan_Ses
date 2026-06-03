@@ -10,9 +10,9 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
+  Image,
 } from "react-native";
 import { useRouter, Link } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
 
 import { useSession } from "@/src/ctx/session";
 import { theme } from "@/src/theme";
@@ -49,10 +49,10 @@ export default function SignIn() {
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <View style={styles.brand}>
           <View style={styles.logoBox}>
-            <Ionicons name="scan-circle" size={64} color={theme.info} />
+            <Image source={require("../assets/images/icon.png")} style={styles.logoImage} resizeMode="contain" />
           </View>
-          <Text style={styles.brandTitle}>CédulaScan Pro</Text>
-          <Text style={styles.brandSub}>Sincronización en tiempo real · Cero duplicados</Text>
+          <Text style={styles.brandTitle}>CedulaScan Pro</Text>
+          <Text style={styles.brandSub}>Docentes en tiempo real</Text>
         </View>
 
         <View style={styles.card}>
@@ -111,36 +111,35 @@ export default function SignIn() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
-  scroll: { flexGrow: 1, justifyContent: "center", padding: 24 },
-  brand: { alignItems: "center", marginBottom: 32 },
+  scroll: { flexGrow: 1, justifyContent: "center", padding: 20 },
+  brand: { alignItems: "center", marginBottom: 22 },
   logoBox: {
-    width: 88,
-    height: 88,
-    borderRadius: 24,
-    backgroundColor: theme.surface,
+    width: 104,
+    height: 104,
+    borderRadius: 28,
+    backgroundColor: theme.bg,
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1,
-    borderColor: theme.border,
     marginBottom: 16,
   },
-  brandTitle: { color: theme.text, fontSize: 28, fontWeight: "900", letterSpacing: -0.5 },
+  logoImage: { width: 104, height: 104 },
+  brandTitle: { color: theme.text, fontSize: 26, fontWeight: "900" },
   brandSub: { color: theme.textSecondary, fontSize: 13, marginTop: 4, textAlign: "center" },
   card: {
     backgroundColor: theme.surface,
-    borderRadius: 24,
-    padding: 24,
+    borderRadius: 8,
+    padding: 20,
     borderWidth: 1,
     borderColor: theme.border,
     gap: 12,
   },
-  title: { color: theme.text, fontSize: 22, fontWeight: "700", marginBottom: 8 },
+  title: { color: theme.text, fontSize: 20, fontWeight: "800", marginBottom: 8 },
   label: { color: theme.textSecondary, fontSize: 12, fontWeight: "700", letterSpacing: 1.5, textTransform: "uppercase", marginTop: 8 },
   input: {
     backgroundColor: theme.bg,
     borderWidth: 1,
     borderColor: theme.border,
-    borderRadius: 12,
+    borderRadius: 8,
     paddingHorizontal: 16,
     paddingVertical: 14,
     color: theme.text,
@@ -148,7 +147,7 @@ const styles = StyleSheet.create({
   },
   btn: {
     backgroundColor: theme.info,
-    borderRadius: 14,
+    borderRadius: 8,
     paddingVertical: 16,
     alignItems: "center",
     marginTop: 16,

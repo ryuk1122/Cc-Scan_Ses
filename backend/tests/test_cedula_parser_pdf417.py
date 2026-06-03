@@ -1,4 +1,4 @@
-from cedula_parser import extract_cedula, parse_pdf417, parse_pdf417_bytes
+from cedula_parser import extract_cedula, mrz_check_digit, parse_mrz_from_text, parse_pdf417, parse_pdf417_bytes
 
 
 def _put(data: bytearray, start: int, end: int, value: str) -> None:
@@ -50,3 +50,53 @@ def test_parse_classic_pdf417_text_preserves_null_padding():
     assert parsed["cedula"] == "1150940755"
     assert extract_cedula(raw) == "1150940755"
     assert parsed["formato_detectado"] == "pdf417_binario_posicional"
+
+
+def _mrz_td1(doc: str = "123456789") -> str:
+    birth = "910729"
+    expiry = "300101"
+    l1 = f"IDCOL{doc}{mrz_check_digit(doc)}".ljust(30, "<")
+    l2_body = f"{birth}{mrz_check_digit(birth)}F{expiry}{mrz_check_digit(expiry)}COL"
+    l2 = l2_body.ljust(29, "<") + "0"
+    l3 = "VALENCIA<BENITEZ<<DAYFENIX".ljust(30, "<")
+    return "\n".join([l1, l2, l3])
+
+
+def test_parse_td1_mrz_from_new_cedula_back():
+    parsed = parse_mrz_from_text(_mrz_td1())
+
+    assert parsed["cedula"] == "123456789"
+    assert parsed["primer_apellido"] == "VALENCIA"
+    assert parsed["segundo_apellido"] == "BENITEZ"
+    assert parsed["nombres"] == "DAYFENIX"
+    assert parsed["fecha_nacimiento"] == "1991-07-29"
+    assert parsed["fecha_expiracion"] == "2030-01-01"
+    assert parsed["mrz_valido"] is True
+
+
+def test_parse_td1_mrz_tolerates_common_ocr_errors():
+    raw = _mrz_td1().replace("IDCOL", "1DC0L").replace("910729", "9I0729")
+
+    parsed = parse_pdf417(raw)
+
+    assert parsed["cedula"] == "123456789"
+    assert parsed["formato_detectado"] == "mrz_td1"
+
+
+def test_parse_new_colombian_iccol_mrz_uses_nuip_line2():
+    raw = "\n".join([
+        "ICCOL000000012305001<<<<<<<<<<",
+        "0403151F3203190C0L1234567890<0",
+        "WALTEROS<<LAURA<<<<<<<<<<<<",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["segundo_apellido"] == ""
+    assert parsed["nombres"] == "LAURA"
+    assert parsed["fecha_nacimiento"] == "2004-03-15"
+    assert parsed["fecha_expiracion"] == "2032-03-19"
+    assert parsed["nacionalidad"] == "COL"
+    assert parsed["mrz_valido"] is True

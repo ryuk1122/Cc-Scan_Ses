@@ -31,6 +31,8 @@ type Registro = {
   timestamp: number;
   created_at: string;
   es_afiliado?: boolean;
+  fecha_nacimiento?: string;
+  fecha_expiracion?: string;
 };
 
 type EventoCtxValue = {
@@ -53,6 +55,13 @@ type EventoCtxValue = {
 const EventoCtx = createContext<EventoCtxValue | undefined>(undefined);
 
 const QUEUE_KEY = "cs_offline_queue";
+const SELECTED_EVENT_KEY = "cs_selected_event";
+const REGISTROS_CACHE_PREFIX = "cs_registros_";
+
+type StoredEvento = {
+  id: string;
+  nombre: string;
+};
 
 type QueueItem = {
   cedula: string;
@@ -70,6 +79,7 @@ type QueueItem = {
   nombres?: string;
   genero?: string;
   fecha_nacimiento?: string;
+  fecha_expiracion?: string;
   tipo_sangre?: string;
   idempotency_key: string;
   attempts: number;
@@ -91,18 +101,44 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<any>(null);
+  const pingTimer = useRef<any>(null);
   const deviceIdRef = useRef<string>("");
 
   useEffect(() => {
     getDeviceId().then((d) => (deviceIdRef.current = d));
   }, []);
 
+  const cacheRegistros = useCallback(async (id: string, list: Registro[]) => {
+    await storage.setItem(`${REGISTROS_CACHE_PREFIX}${id}`, list as any);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const saved = await storage.getItem<StoredEvento | null>(SELECTED_EVENT_KEY, null);
+      if (cancelled || !saved?.id) return;
+      const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${saved.id}`, null)) || [];
+      setEventoId(saved.id);
+      setEventoNombre(saved.nombre || "");
+      cedulasSetRef.current = new Set(cached.map((r) => r.cedula));
+      setRegistros(cached);
+      forceRender((n) => n + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const addRegistro = useCallback((r: Registro) => {
     if (cedulasSetRef.current.has(r.cedula)) return;
     cedulasSetRef.current.add(r.cedula);
-    setRegistros((prev) => [r, ...prev]);
+    setRegistros((prev) => {
+      const next = [r, ...prev];
+      void cacheRegistros(r.evento_id, next);
+      return next;
+    });
     forceRender((n) => n + 1);
-  }, []);
+  }, [cacheRegistros]);
 
   const refreshRegistros = useCallback(async () => {
     if (!eventoId) return;
@@ -111,13 +147,14 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       const set = new Set<string>(list.map((r) => r.cedula));
       cedulasSetRef.current = set;
       setRegistros(list as Registro[]);
+      await cacheRegistros(eventoId, list as Registro[]);
       const est = await api.estado(eventoId);
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
-    } catch (e) {
+    } catch {
       // ignore
     }
-  }, [eventoId]);
+  }, [eventoId, cacheRegistros]);
 
   // WS lifecycle
   useEffect(() => {
@@ -125,9 +162,15 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
     let cancelled = false;
 
+    const stopPing = () => {
+      if (pingTimer.current) clearInterval(pingTimer.current);
+      pingTimer.current = null;
+    };
+
     const connect = () => {
       if (cancelled) return;
       setWsStatus("connecting");
+      stopPing();
       try {
         const url = wsUrl(eventoId, token, deviceIdRef.current);
         const ws = new WebSocket(url);
@@ -136,6 +179,16 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         ws.onopen = () => {
           if (cancelled) return;
           setWsStatus("online");
+          stopPing();
+          pingTimer.current = setInterval(() => {
+            try {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+              }
+            } catch {
+              // ignore
+            }
+          }, 25000);
         };
         ws.onmessage = (evt) => {
           try {
@@ -155,10 +208,12 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           }
         };
         ws.onerror = () => {
+          stopPing();
           setWsStatus("offline");
         };
         ws.onclose = () => {
           if (cancelled) return;
+          stopPing();
           setWsStatus("offline");
           // retry in 2s
           if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -166,6 +221,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         };
       } catch {
         setWsStatus("offline");
+        stopPing();
         if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
         reconnectTimer.current = setTimeout(connect, 2000);
       }
@@ -175,6 +231,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      stopPing();
       try {
         wsRef.current?.close();
       } catch {
@@ -211,6 +268,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
             nombres: item.nombres || "",
             genero: item.genero || "",
             fecha_nacimiento: item.fecha_nacimiento || "",
+            fecha_expiracion: item.fecha_expiracion || "",
             tipo_sangre: item.tipo_sangre || "",
           },
           item.idempotency_key,
@@ -244,6 +302,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const selectEvento = useCallback(async (id: string, nombre: string) => {
     setEventoId(id);
     setEventoNombre(nombre);
+    await storage.setItem(SELECTED_EVENT_KEY, { id, nombre });
     cedulasSetRef.current = new Set();
     setRegistros([]);
     setDuplicadosBloqueados(0);
@@ -256,25 +315,33 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       const set = new Set<string>(list.map((r) => r.cedula));
       cedulasSetRef.current = set;
       setRegistros(list as Registro[]);
+      await cacheRegistros(id, list as Registro[]);
       const est = await api.estado(id);
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
       // ignore
     }
-  }, []);
+  }, [cacheRegistros]);
 
   const clearEvento = useCallback(() => {
     setEventoId(null);
     setEventoNombre("");
     setRegistros([]);
     cedulasSetRef.current = new Set();
+    void storage.removeItem(SELECTED_EVENT_KEY);
     try {
       wsRef.current?.close();
     } catch {
       // ignore
     }
   }, []);
+
+  useEffect(() => {
+    if (eventoId && token) {
+      void refreshRegistros();
+    }
+  }, [eventoId, token, refreshRegistros]);
 
   const scan = useCallback(
     async (cedulaRaw: string, extras: Partial<Registro> & { raw_barcode?: string } = {}) => {
@@ -310,6 +377,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         nombres: (extras as any).nombres || "",
         genero: (extras as any).genero || "",
         fecha_nacimiento: (extras as any).fecha_nacimiento || "",
+        fecha_expiracion: (extras as any).fecha_expiracion || "",
         tipo_sangre: (extras as any).tipo_sangre || "",
       };
 

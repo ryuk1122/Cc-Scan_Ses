@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -14,13 +14,14 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { theme } from "@/src/theme";
 import { errorMessage } from "@/src/utils/errors";
 import { api } from "@/src/utils/api";
 import { useEvento } from "@/src/ctx/evento";
+import EscanearScreen from "./escanear";
 
 type Evento = {
   id: string;
@@ -55,7 +56,6 @@ function normalizeEventDate(value: string): string | null {
 }
 
 export default function EventosScreen() {
-  const router = useRouter();
   const { selectEvento, eventoId } = useEvento();
   const [items, setItems] = useState<Evento[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,7 +68,7 @@ export default function EventosScreen() {
     try {
       const list = await api.listEventos();
       setItems(list as Evento[]);
-    } catch (e: any) {
+    } catch {
       // silent
     } finally {
       setLoading(false);
@@ -81,10 +81,6 @@ export default function EventosScreen() {
       load();
     }, [load]),
   );
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const onCreate = async () => {
     if (!nuevo.nombre) {
@@ -111,8 +107,11 @@ export default function EventosScreen() {
 
   const onSelect = async (item: Evento) => {
     await selectEvento(item.id, item.nombre);
-    router.push("/(app)/escanear");
   };
+
+  if (eventoId) {
+    return <EscanearScreen />;
+  }
 
   if (loading) {
     return (
@@ -126,8 +125,8 @@ export default function EventosScreen() {
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Eventos</Text>
-          <Text style={styles.subtitle}>Selecciona un evento para escanear</Text>
+          <Text style={styles.title}>Escaner</Text>
+          <Text style={styles.subtitle}>Selecciona evento y empieza a registrar</Text>
         </View>
         <TouchableOpacity
           testID="open-create-evento"
@@ -280,30 +279,30 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 16,
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 12,
   },
-  title: { color: theme.text, fontSize: 32, fontWeight: "900", letterSpacing: -0.8 },
+  title: { color: theme.text, fontSize: 26, fontWeight: "900" },
   subtitle: { color: theme.textSecondary, fontSize: 13, marginTop: 2 },
   addBtn: {
     backgroundColor: theme.info,
     width: 44,
     height: 44,
-    borderRadius: 22,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
-  list: { paddingHorizontal: 16, paddingBottom: 40 },
+  list: { paddingHorizontal: 12, paddingBottom: 32 },
   empty: { alignItems: "center", justifyContent: "center", padding: 60, gap: 12 },
   emptyText: { color: theme.textSecondary, fontSize: 14 },
   card: {
     backgroundColor: theme.surface,
     borderWidth: 1,
     borderColor: theme.border,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -313,7 +312,7 @@ const styles = StyleSheet.create({
   cardIcon: {
     width: 44,
     height: 44,
-    borderRadius: 12,
+    borderRadius: 8,
     backgroundColor: theme.infoBg,
     alignItems: "center",
     justifyContent: "center",

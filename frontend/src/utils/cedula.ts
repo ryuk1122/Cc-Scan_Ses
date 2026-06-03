@@ -6,6 +6,7 @@ const AFTER_GENDER_RE = /(?:^|[-_\s|;,])([MF])[-_\s]*(\d{5,11})(?!\d)/g;
 const DASH_GENDER_RE = /-([MF])-(\d{5,11})-/;
 const COLOMBIAN_DASH_PAYLOAD_RE = /(?:^|[^A-Z0-9])([A-Z])-\d{5,8}-\d{5,10}-([MF])-(\d{5,11})-((?:19|20)\d{6})(?:[^0-9]|$)/;
 const PIPE_FORMAT_RE = /^(\d{5,11})\|/;
+const KEY_VALUE_ID_RE = /(?:NUIP|DOCUMENTO|DOCUMENT_NUMBER|CEDULA|C[EÉ]DULA|IDENTIFICACION|IDENTIFICACI[OÓ]N)["']?\s*[:=]\s*["']?([0-9][0-9\s.,]{4,18}[0-9])/i;
 const DATE_YYYYMMDD_RE = /^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/;
 const DATE_YYMMDD_RE = /^\d{6}$/;
 const YEAR_ONLY_RE = /^(19|20)\d{2}$/;
@@ -16,6 +17,16 @@ const SANGRE_RE = /(?<![A-Z])(AB|O|A|B)\s*([+\-])(?![A-Z0-9])/;
 const MRZ_LINE_RE = /^[A-Z0-9<]{24,32}$/;
 const TEXT_FIELD_RE = /[^A-ZÁÉÍÓÚÜÑ\s.'-]/g;
 const MRZ_WEIGHTS = [7, 3, 1];
+const MRZ_DIGIT_FIXES: Record<string, string> = {
+  O: "0",
+  Q: "0",
+  D: "0",
+  I: "1",
+  L: "1",
+  B: "8",
+  S: "5",
+  Z: "2",
+};
 const PDF417_MARKER = "PubDSK_";
 const PDF417_MIN_CLASSIC_LEN = 168;
 const PDF417_FIELD_RANGES = {
@@ -209,10 +220,40 @@ function validateMrzField(value: string, checkDigit: string): boolean {
   return /^\d$/.test(checkDigit || "") && mrzCheckDigit(value) === Number(checkDigit);
 }
 
-function formatMrzDate(yymmdd: string): string {
+function cleanMrzCandidate(line: string): string {
+  let compact = String(line || "")
+    .toUpperCase()
+    .replace(/[«‹›>\s]/g, (char) => (char === ">" || char === "«" || char === "‹" || char === "›" ? "<" : ""))
+    .replace(/[^A-Z0-9<]/g, "");
+  if (compact.startsWith("ID<COL")) compact = `IDCOL${compact.slice(6)}`;
+  if (compact.startsWith("IC<COL")) compact = `ICCOL${compact.slice(6)}`;
+  if (compact.startsWith("1D")) compact = `ID${compact.slice(2)}`;
+  if (compact.startsWith("1C")) compact = `IC${compact.slice(2)}`;
+  if (compact.length >= 5) {
+    const head = compact.slice(0, 5);
+    let normalizedHead = head.replace(/0/g, "O");
+    if (normalizedHead.startsWith("IDCO") && ["1", "I", "L"].includes(normalizedHead[4])) {
+      normalizedHead = "IDCOL";
+    }
+    if (normalizedHead === "IDCOL") compact = `IDCOL${compact.slice(5)}`;
+    else if (normalizedHead.startsWith("ICCO") && ["1", "I", "L"].includes(normalizedHead[4])) {
+      compact = `ICCOL${compact.slice(5)}`;
+    }
+  }
+  return compact;
+}
+
+function fixMrzDigits(value: string): string {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[OQDILBSZ]/g, (char) => MRZ_DIGIT_FIXES[char] || char);
+}
+
+function formatMrzDate(yymmdd: string, future = false): string {
   if (!DATE_YYMMDD_RE.test(yymmdd || "")) return "";
   const yy = Number(yymmdd.slice(0, 2));
-  const yyyy = yy > 30 ? 1900 + yy : 2000 + yy;
+  const currentYy = Number(new Date().getFullYear().toString().slice(2));
+  const yyyy = future ? 2000 + yy : (yy > currentYy ? 1900 + yy : 2000 + yy);
   return `${yyyy}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}`;
 }
 
@@ -220,20 +261,22 @@ function candidateMrzLines(raw: string): string[] {
   const lines = String(raw || "")
     .toUpperCase()
     .split(/\r?\n/)
-    .map((line) => line.replace(/[^A-Z0-9<]/g, ""))
+    .map(cleanMrzCandidate)
     .filter((line) => MRZ_LINE_RE.test(line))
     .map((line) => line.slice(0, 30).padEnd(30, "<"));
   if (lines.length >= 3) return lines.slice(0, 3);
 
-  const compact = String(raw || "").toUpperCase().replace(/[^A-Z0-9<]/g, "");
-  const start = compact.indexOf("IDCOL");
-  if (start >= 0 && compact.length - start >= 85) {
-    const chunk = compact.slice(start, start + 90);
-    return [
-      chunk.slice(0, 30).padEnd(30, "<"),
-      chunk.slice(30, 60).padEnd(30, "<"),
-      chunk.slice(60, 90).padEnd(30, "<"),
-    ];
+  const compact = cleanMrzCandidate(String(raw || ""));
+  for (const prefix of ["IDCOL", "ICCOL"]) {
+    const start = compact.indexOf(prefix);
+    if (start >= 0 && compact.length - start >= 85) {
+      const chunk = compact.slice(start, start + 90);
+      return [
+        chunk.slice(0, 30).padEnd(30, "<"),
+        chunk.slice(30, 60).padEnd(30, "<"),
+        chunk.slice(60, 90).padEnd(30, "<"),
+      ];
+    }
   }
   return [];
 }
@@ -242,28 +285,60 @@ export function parseMrz(raw: string | null | undefined): ParsedCedula {
   const out = emptyParsed(raw);
   if (!raw) return out;
   const lines = candidateMrzLines(raw);
-  if (lines.length < 3 || !lines[0].startsWith("IDCOL")) return out;
+  if (lines.length < 3 || (!lines[0].startsWith("IDCOL") && !lines[0].startsWith("ICCOL"))) return out;
 
   const [l1, l2, l3] = lines;
-  const docMatch = l1.match(/^IDCOL(\d{5,11})<?(\d)/);
-  const docField = docMatch?.[1] || l1.slice(5, 14);
-  const docCheck = docMatch?.[2] || l1[14];
-  const birth = l2.slice(0, 6);
-  const birthCheck = l2[6];
-  const expiry = l2.slice(8, 14);
-  const expiryCheck = l2[14];
-  const names = l3.replace(/0/g, "O").split("<").filter(Boolean);
+  const l1Numeric = `${l1.slice(0, 5)}${fixMrzDigits(l1.slice(5))}`;
+  const docFieldRaw = fixMrzDigits(l1.slice(5, 14));
+  const docCheckRaw = fixMrzDigits(l1[14]).slice(0, 1);
+  const extraChar = fixMrzDigits(l1.slice(15, 16));
+  let docField = docFieldRaw;
+  let docCheck = docCheckRaw;
+  const docMatch = l1Numeric.match(/^(?:IDCOL|ICCOL)(\d{5,9})([0-9])/);
+  if (docMatch) {
+    const candidate = docMatch[1];
+    const possibleCheck = docMatch[2];
+    if (validateMrzField(candidate.replace(/^0+/, "") || candidate, possibleCheck)) {
+      docField = candidate;
+      docCheck = possibleCheck;
+    } else if (/^\d$/.test(extraChar)) {
+      const candidate10 = candidate + possibleCheck;
+      if (validateMrzField(candidate10, extraChar)) {
+        docField = candidate10;
+        docCheck = extraChar;
+      }
+    }
+  }
+  const birth = fixMrzDigits(l2.slice(0, 6));
+  const birthCheck = fixMrzDigits(l2[6]).slice(0, 1);
+  const expiry = fixMrzDigits(l2.slice(8, 14));
+  const expiryCheck = fixMrzDigits(l2[14]).slice(0, 1);
+  const optionalNuip = fixMrzDigits(l2.slice(18, 29).replace(/</g, ""));
+  const nameLine = l3.replace(/0/g, "O").replace(/<+$/g, "");
 
-  out.cedula = docField.replace(/</g, "").replace(/^0+/, "");
+  const docCedula = docField.replace(/</g, "").replace(/^0+/, "");
+  out.cedula = optionalNuip.length > docCedula.length && /^\d{7,11}$/.test(optionalNuip)
+    ? optionalNuip.replace(/^0+/, "")
+    : docCedula;
   out.genero = ["M", "F"].includes(l2[7]) ? l2[7] : "";
   out.fecha_nacimiento = formatMrzDate(birth);
-  out.fecha_expiracion = formatMrzDate(expiry);
-  out.nacionalidad = l2.slice(15, 18);
-  out.primer_apellido = names[0] || "";
-  out.segundo_apellido = names[1] || "";
-  out.nombres = names.slice(2).join(" ");
+  out.fecha_expiracion = formatMrzDate(expiry, true);
+  out.nacionalidad = l2.slice(15, 18).replace(/0/g, "O").replace(/1/g, "I");
+  if (nameLine.includes("<<")) {
+    const [lastBlock, firstBlock] = nameLine.split("<<", 2);
+    const lastParts = lastBlock.split("<").filter(Boolean);
+    const firstParts = firstBlock.split("<").filter(Boolean);
+    out.primer_apellido = lastParts[0] || "";
+    out.segundo_apellido = lastParts.slice(1).join(" ");
+    out.nombres = firstParts.join(" ");
+  } else {
+    const names = nameLine.split("<").filter(Boolean);
+    out.primer_apellido = names[0] || "";
+    out.segundo_apellido = names[1] || "";
+    out.nombres = names.slice(2).join(" ");
+  }
   out.raw_mrz = lines;
-  out.mrz_valido = validateMrzField(docField, docCheck)
+  out.mrz_valido = validateMrzField(docField.replace(/^0+/, "") || docField, docCheck)
     && validateMrzField(birth, birthCheck)
     && validateMrzField(expiry, expiryCheck);
   return out;
@@ -297,6 +372,14 @@ export function extractCedula(raw: string | null | undefined): string | null {
 
   if (/^\d{5,11}$/.test(s) && !isDateLike(s)) {
     return cleanLeadingZeros(s) ? s : null;
+  }
+
+  const keyValueId = s.match(KEY_VALUE_ID_RE);
+  if (keyValueId) {
+    const normalized = keyValueId[1].replace(/[.,\s]/g, "");
+    if (/^\d{5,11}$/.test(normalized) && !isDateLike(normalized)) {
+      return cleanLeadingZeros(normalized) ? normalized : null;
+    }
   }
 
   const colombianDash = s.toUpperCase().match(COLOMBIAN_DASH_PAYLOAD_RE);

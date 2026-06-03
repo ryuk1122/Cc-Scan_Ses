@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Linking,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -24,7 +25,32 @@ import { useSession } from "@/src/ctx/session";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
 
-type Tab = "afiliados" | "registros";
+type Tab = "panel" | "afiliados" | "registros";
+type MetricItem = { label: string; total: number };
+type AdminMetrics = {
+  global: { afiliados: number; eventos: number; eventos_activos: number; registros: number };
+  evento_actual: {
+    registros: number;
+    hoy: number;
+    afiliados: number;
+    no_afiliados: number;
+    duplicados: number;
+    dispositivos_usados: number;
+    dispositivos_activos: number;
+    calidad_nombre_pct: number;
+    calidad_fecha_pct: number;
+  };
+  top_municipios: MetricItem[];
+  top_operadores: MetricItem[];
+  por_hora: MetricItem[];
+  recientes: any[];
+  ia: { configured: boolean; enabled: boolean; model: string; mode: string; min_confidence: number };
+};
+
+function fmt(n: unknown): string {
+  const value = Number(n || 0);
+  return Number.isFinite(value) ? value.toLocaleString("es-CO") : "0";
+}
 
 function cleanDisplayName(value: unknown): string {
   const text = String(value || "")
@@ -34,11 +60,43 @@ function cleanDisplayName(value: unknown): string {
   return text.length >= 2 ? text : "";
 }
 
+function MetricBar({ label, value, color }: { label: string; value: number; color: string }) {
+  const pct = Math.max(0, Math.min(100, Number(value) || 0));
+  return (
+    <View style={styles.metricBarWrap}>
+      <View style={styles.metricBarHeader}>
+        <Text style={styles.metricBarLabel}>{label}</Text>
+        <Text style={styles.metricBarValue}>{pct.toFixed(1)}%</Text>
+      </View>
+      <View style={styles.metricTrack}>
+        <View style={[styles.metricFill, { width: `${pct}%`, backgroundColor: color }]} />
+      </View>
+    </View>
+  );
+}
+
+function CountRow({ item, max }: { item: MetricItem; max: number }) {
+  const pct = Math.max(6, Math.min(100, (item.total / Math.max(max, 1)) * 100));
+  return (
+    <View style={styles.countRow}>
+      <View style={styles.countTop}>
+        <Text style={styles.countLabel} numberOfLines={1}>{item.label || "(sin dato)"}</Text>
+        <Text style={styles.countValue}>{fmt(item.total)}</Text>
+      </View>
+      <View style={styles.countTrack}>
+        <View style={[styles.countFill, { width: `${pct}%` }]} />
+      </View>
+    </View>
+  );
+}
+
 export default function AdminScreen() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
 
-  const [tab, setTab] = useState<Tab>("afiliados");
+  const [tab, setTab] = useState<Tab>("panel");
+  const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
 
   // Afiliados state
   const [afQuery, setAfQuery] = useState("");
@@ -51,6 +109,19 @@ export default function AdminScreen() {
   // Registros
   const { eventoId, eventoNombre, refreshRegistros, registros } = useEvento();
   const [exporting, setExporting] = useState(false);
+
+  const loadMetrics = useCallback(async () => {
+    if (!isAdmin) return;
+    setMetricsLoading(true);
+    try {
+      const r = await api.adminMetrics(eventoId || undefined);
+      setMetrics(r as AdminMetrics);
+    } catch (e: any) {
+      Alert.alert("Error", errorMessage(e, "No se pudieron cargar las metricas"));
+    } finally {
+      setMetricsLoading(false);
+    }
+  }, [eventoId, isAdmin]);
 
   const loadAfiliados = useCallback(async () => {
     if (!isAdmin) return;
@@ -72,6 +143,13 @@ export default function AdminScreen() {
       return () => clearTimeout(t);
     }
   }, [tab, loadAfiliados]);
+
+  useEffect(() => {
+    if (tab !== "panel") return;
+    void loadMetrics();
+    const id = setInterval(loadMetrics, 7000);
+    return () => clearInterval(id);
+  }, [tab, loadMetrics]);
 
   const pickImport = async () => {
     try {
@@ -230,28 +308,162 @@ export default function AdminScreen() {
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <View style={styles.header}>
-        <Text style={styles.eyebrow}>Administración</Text>
-        <Text style={styles.title}>Panel Admin</Text>
+        <Text style={styles.eyebrow}>Administracion</Text>
+        <Text style={styles.title}>Admin</Text>
       </View>
 
       <View style={styles.tabRow}>
+        <TouchableOpacity
+          testID="admin-tab-panel"
+          style={[styles.tabBtn, tab === "panel" && styles.tabActive]}
+          onPress={() => setTab("panel")}
+        >
+          <Ionicons name="analytics" size={16} color={tab === "panel" ? "#fff" : theme.textSecondary} />
+          <Text style={[styles.tabText, tab === "panel" && { color: "#fff" }]}>Panel</Text>
+        </TouchableOpacity>
         <TouchableOpacity
           testID="admin-tab-afiliados"
           style={[styles.tabBtn, tab === "afiliados" && styles.tabActive]}
           onPress={() => setTab("afiliados")}
         >
-          <Text style={[styles.tabText, tab === "afiliados" && { color: "#fff" }]}>Docentes ({afTotal})</Text>
+          <Ionicons name="people" size={16} color={tab === "afiliados" ? "#fff" : theme.textSecondary} />
+          <Text style={[styles.tabText, tab === "afiliados" && { color: "#fff" }]}>Docentes</Text>
+          <Text style={[styles.tabBadge, tab === "afiliados" && { color: "#fff" }]}>{afTotal}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           testID="admin-tab-registros"
           style={[styles.tabBtn, tab === "registros" && styles.tabActive]}
           onPress={() => setTab("registros")}
         >
-          <Text style={[styles.tabText, tab === "registros" && { color: "#fff" }]}>Registros</Text>
+          <Ionicons name="list" size={16} color={tab === "registros" ? "#fff" : theme.textSecondary} />
+          <Text style={[styles.tabText, tab === "registros" && { color: "#fff" }]}>Evento</Text>
+          <Text style={[styles.tabBadge, tab === "registros" && { color: "#fff" }]}>{registros.length}</Text>
         </TouchableOpacity>
       </View>
 
-      {tab === "afiliados" ? (
+      {tab === "panel" ? (
+        <ScrollView
+          contentContainerStyle={styles.panelScroll}
+          refreshControl={<RefreshControl tintColor={theme.brand} refreshing={metricsLoading} onRefresh={loadMetrics} />}
+        >
+          {metricsLoading && !metrics ? (
+            <ActivityIndicator color={theme.brand} style={{ marginTop: 24 }} />
+          ) : (
+            <>
+              <View style={styles.kpiGrid}>
+                <View style={styles.kpiCard}>
+                  <View style={styles.kpiHeader}>
+                    <Ionicons name="people" size={18} color={theme.brand} />
+                    <Text style={styles.kpiLabel}>Docentes base</Text>
+                  </View>
+                  <Text style={styles.kpiValue}>{fmt(metrics?.global.afiliados)}</Text>
+                  <Text style={styles.kpiFoot}>Registros maestros cargados</Text>
+                </View>
+                <View style={styles.kpiCard}>
+                  <View style={styles.kpiHeader}>
+                    <Ionicons name="calendar-check" size={18} color={theme.success} />
+                    <Text style={styles.kpiLabel}>Eventos</Text>
+                  </View>
+                  <Text style={styles.kpiValue}>{fmt(metrics?.global.eventos)}</Text>
+                  <Text style={styles.kpiFoot}>{fmt(metrics?.global.eventos_activos)} activos</Text>
+                </View>
+                <View style={styles.kpiCard}>
+                  <View style={styles.kpiHeader}>
+                    <Ionicons name="scan" size={18} color={theme.info} />
+                    <Text style={styles.kpiLabel}>Escaneos evento</Text>
+                  </View>
+                  <Text style={styles.kpiValue}>{fmt(metrics?.evento_actual.registros ?? registros.length)}</Text>
+                  <Text style={styles.kpiFoot}>{fmt(metrics?.evento_actual.hoy)} hoy</Text>
+                </View>
+                <View style={styles.kpiCard}>
+                  <View style={styles.kpiHeader}>
+                    <Ionicons name="shield-checkmark" size={18} color={theme.error} />
+                    <Text style={styles.kpiLabel}>Duplicados</Text>
+                  </View>
+                  <Text style={[styles.kpiValue, { color: theme.error }]}>{fmt(metrics?.evento_actual.duplicados)}</Text>
+                  <Text style={styles.kpiFoot}>Bloqueados por evento</Text>
+                </View>
+              </View>
+
+              <View style={styles.panelCard}>
+                <View style={styles.panelCardHeader}>
+                  <Text style={styles.panelCardTitle}>IA Gemini</Text>
+                  <View style={[styles.statusPill, { borderColor: metrics?.ia.enabled ? theme.success : theme.warning }]}>
+                    <View style={[styles.statusDot, { backgroundColor: metrics?.ia.enabled ? theme.success : theme.warning }]} />
+                    <Text style={[styles.statusPillText, { color: metrics?.ia.enabled ? theme.success : theme.warning }]}>
+                      {metrics?.ia.enabled ? "Activa" : "Pendiente"}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.panelText}>
+                  {metrics?.ia.enabled
+                    ? `Modelo ${metrics.ia.model} · modo ${metrics.ia.mode} · confianza minima ${metrics.ia.min_confidence}`
+                    : "Configura GEMINI_API_KEY en el backend para activar vision AI como respaldo de OCR."}
+                </Text>
+              </View>
+
+              <View style={styles.panelCard}>
+                <Text style={styles.panelCardTitle}>Calidad del evento</Text>
+                <MetricBar label="Con nombre" value={metrics?.evento_actual.calidad_nombre_pct || 0} color={theme.success} />
+                <MetricBar label="Con fecha nacimiento" value={metrics?.evento_actual.calidad_fecha_pct || 0} color={theme.info} />
+                <View style={styles.splitRow}>
+                  <View style={styles.splitBox}>
+                    <Text style={styles.splitValue}>{fmt(metrics?.evento_actual.afiliados)}</Text>
+                    <Text style={styles.splitLabel}>Docentes SI</Text>
+                  </View>
+                  <View style={styles.splitBox}>
+                    <Text style={styles.splitValue}>{fmt(metrics?.evento_actual.no_afiliados)}</Text>
+                    <Text style={styles.splitLabel}>Docentes NO</Text>
+                  </View>
+                  <View style={styles.splitBox}>
+                    <Text style={styles.splitValue}>{fmt(metrics?.evento_actual.dispositivos_activos)}</Text>
+                    <Text style={styles.splitLabel}>Activos</Text>
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.panelCard}>
+                <Text style={styles.panelCardTitle}>Actividad ultimas 24h</Text>
+                {(metrics?.por_hora || []).length ? (
+                  metrics?.por_hora.map((it) => (
+                    <CountRow key={it.label} item={it} max={Math.max(...(metrics?.por_hora || []).map((x) => x.total), 1)} />
+                  ))
+                ) : (
+                  <Text style={styles.emptySmall}>Sin actividad reciente.</Text>
+                )}
+              </View>
+
+              <View style={styles.dualPanel}>
+                <View style={styles.panelCardHalf}>
+                  <Text style={styles.panelCardTitle}>Top municipios</Text>
+                  {(metrics?.top_municipios || []).length ? metrics?.top_municipios.map((it) => (
+                    <CountRow key={it.label} item={it} max={Math.max(...(metrics?.top_municipios || []).map((x) => x.total), 1)} />
+                  )) : <Text style={styles.emptySmall}>Sin datos.</Text>}
+                </View>
+                <View style={styles.panelCardHalf}>
+                  <Text style={styles.panelCardTitle}>Operadores</Text>
+                  {(metrics?.top_operadores || []).length ? metrics?.top_operadores.map((it) => (
+                    <CountRow key={it.label} item={it} max={Math.max(...(metrics?.top_operadores || []).map((x) => x.total), 1)} />
+                  )) : <Text style={styles.emptySmall}>Sin datos.</Text>}
+                </View>
+              </View>
+
+              <View style={styles.panelCard}>
+                <Text style={styles.panelCardTitle}>Lecturas recientes</Text>
+                {(metrics?.recientes || []).length ? metrics?.recientes.map((item) => (
+                  <View key={item.id} style={styles.recentAdminRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.afCed}>{item.cedula}</Text>
+                      <Text style={styles.afName} numberOfLines={1}>{cleanDisplayName(item.nombre) || "(sin nombre)"}</Text>
+                    </View>
+                    <Text style={styles.recentBadge}>{item.es_afiliado ? "SI" : "NO"}</Text>
+                  </View>
+                )) : <Text style={styles.emptySmall}>Sin registros.</Text>}
+              </View>
+            </>
+          )}
+        </ScrollView>
+      ) : tab === "afiliados" ? (
         <View style={{ flex: 1 }}>
           <View style={styles.searchRow}>
             <TextInput
@@ -311,6 +523,26 @@ export default function AdminScreen() {
                 </>
               )}
             </TouchableOpacity>
+            <View style={styles.eventActionRow}>
+              <TouchableOpacity
+                testID="admin-clear-event-registros"
+                style={[styles.dangerBtn, (!eventoId || !registros.length) && styles.disabledBtn]}
+                onPress={onClearAllRegistros}
+                disabled={!eventoId || !registros.length}
+              >
+                <Ionicons name="remove-circle-outline" size={17} color={theme.warning} />
+                <Text style={styles.dangerBtnText}>Limpiar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="admin-delete-event"
+                style={[styles.dangerBtn, styles.deleteBtn, !eventoId && styles.disabledBtn]}
+                onPress={onDeleteEvento}
+                disabled={!eventoId}
+              >
+                <Ionicons name="trash-outline" size={17} color={theme.error} />
+                <Text style={[styles.dangerBtnText, { color: theme.error }]}>Evento</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           <FlatList
@@ -388,39 +620,78 @@ export default function AdminScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.bg },
-  header: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 8 },
+  header: { paddingHorizontal: 16, paddingTop: 6, paddingBottom: 8 },
   eyebrow: { color: theme.brand, fontSize: 11, fontWeight: "800", letterSpacing: 2, textTransform: "uppercase" },
-  title: { color: theme.text, fontSize: 30, fontWeight: "900", letterSpacing: -0.8 },
-  tabRow: { flexDirection: "row", marginHorizontal: 16, marginVertical: 8, backgroundColor: theme.surface, borderRadius: 12, padding: 4, borderWidth: 1, borderColor: theme.border },
-  tabBtn: { flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: "center" },
+  title: { color: theme.text, fontSize: 25, fontWeight: "900" },
+  tabRow: { flexDirection: "row", marginHorizontal: 12, marginVertical: 6, backgroundColor: theme.surface, borderRadius: 8, padding: 3, borderWidth: 1, borderColor: theme.border },
+  tabBtn: { flex: 1, flexDirection: "row", paddingVertical: 9, borderRadius: 6, alignItems: "center", justifyContent: "center", gap: 6 },
   tabActive: { backgroundColor: theme.brand },
   tabText: { color: theme.textSecondary, fontWeight: "700", fontSize: 13 },
-  searchRow: { flexDirection: "row", paddingHorizontal: 16, gap: 8, marginVertical: 4 },
-  search: { flex: 1, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, color: theme.text, fontSize: 14 },
-  iconBtn: { width: 44, height: 44, borderRadius: 12, backgroundColor: theme.brand, alignItems: "center", justifyContent: "center" },
-  afRow: { flexDirection: "row", alignItems: "center", padding: 12, backgroundColor: theme.surface, borderRadius: 12, borderWidth: 1, borderColor: theme.border, gap: 8 },
+  tabBadge: { color: theme.textDisabled, fontWeight: "900", fontSize: 12 },
+  panelScroll: { padding: 12, paddingBottom: 40, gap: 10 },
+  kpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  kpiCard: { flexGrow: 1, flexBasis: "47%", minWidth: 150, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, padding: 12 },
+  kpiHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  kpiLabel: { color: theme.textSecondary, fontSize: 10, fontWeight: "900", textTransform: "uppercase", letterSpacing: 1 },
+  kpiValue: { color: theme.text, fontSize: 28, fontWeight: "900", marginTop: 6 },
+  kpiFoot: { color: theme.textDisabled, fontSize: 11, marginTop: 2 },
+  panelCard: { backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, padding: 12, gap: 8 },
+  panelCardHalf: { flex: 1, minWidth: 150, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, padding: 12, gap: 8 },
+  panelCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  panelCardTitle: { color: theme.text, fontSize: 13, fontWeight: "900", textTransform: "uppercase", letterSpacing: 1 },
+  panelText: { color: theme.textSecondary, fontSize: 12, lineHeight: 17 },
+  statusPill: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusPillText: { fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  splitRow: { flexDirection: "row", gap: 8, marginTop: 4 },
+  splitBox: { flex: 1, backgroundColor: theme.bg, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 9 },
+  splitValue: { color: theme.text, fontSize: 18, fontWeight: "900" },
+  splitLabel: { color: theme.textDisabled, fontSize: 10, marginTop: 2 },
+  metricBarWrap: { gap: 5 },
+  metricBarHeader: { flexDirection: "row", justifyContent: "space-between" },
+  metricBarLabel: { color: theme.textSecondary, fontSize: 12, fontWeight: "700" },
+  metricBarValue: { color: theme.text, fontSize: 12, fontWeight: "900" },
+  metricTrack: { height: 8, backgroundColor: theme.bg, borderRadius: 8, overflow: "hidden" },
+  metricFill: { height: 8, borderRadius: 8 },
+  dualPanel: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  countRow: { gap: 5 },
+  countTop: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
+  countLabel: { flex: 1, color: theme.textSecondary, fontSize: 12, fontWeight: "700" },
+  countValue: { color: theme.text, fontSize: 12, fontWeight: "900" },
+  countTrack: { height: 6, backgroundColor: theme.bg, borderRadius: 6, overflow: "hidden" },
+  countFill: { height: 6, backgroundColor: theme.brand, borderRadius: 6 },
+  recentAdminRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, borderTopWidth: 1, borderTopColor: theme.border },
+  recentBadge: { color: theme.success, borderWidth: 1, borderColor: theme.success, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, fontSize: 11, fontWeight: "900" },
+  emptySmall: { color: theme.textDisabled, fontSize: 12, paddingVertical: 8 },
+  searchRow: { flexDirection: "row", paddingHorizontal: 12, gap: 8, marginVertical: 4 },
+  search: { flex: 1, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 10, color: theme.text, fontSize: 14 },
+  iconBtn: { width: 44, height: 44, borderRadius: 8, backgroundColor: theme.brand, alignItems: "center", justifyContent: "center" },
+  afRow: { flexDirection: "row", alignItems: "center", padding: 12, backgroundColor: theme.surface, borderRadius: 8, borderWidth: 1, borderColor: theme.border, gap: 8 },
   afCed: { color: theme.text, fontWeight: "900", fontSize: 14 },
   afName: { color: theme.textSecondary, fontSize: 12, marginTop: 2 },
   afMeta: { color: theme.textDisabled, fontSize: 11, marginTop: 2 },
   afAction: { padding: 8 },
   empty: { color: theme.textDisabled, textAlign: "center", padding: 40 },
-  eventInfo: { padding: 14, backgroundColor: theme.surface, borderRadius: 14, borderWidth: 1, borderColor: theme.border, marginBottom: 12 },
+  eventInfo: { padding: 12, backgroundColor: theme.surface, borderRadius: 8, borderWidth: 1, borderColor: theme.border, marginBottom: 10 },
   eventInfoLabel: { color: theme.textSecondary, fontSize: 11, fontWeight: "800", letterSpacing: 1.5, textTransform: "uppercase" },
   eventInfoName: { color: theme.text, fontSize: 18, fontWeight: "800", marginTop: 4 },
   eventInfoMeta: { color: theme.textSecondary, fontSize: 12, marginTop: 4 },
-  exportBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, backgroundColor: theme.brand, borderRadius: 12, marginTop: 10 },
+  exportBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, backgroundColor: theme.brand, borderRadius: 8, marginTop: 10 },
   exportBtnText: { color: "#fff", fontWeight: "800" },
-  dangerBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: theme.warning, backgroundColor: "rgba(255,204,0,0.08)" },
+  eventActionRow: { flexDirection: "row", gap: 8, marginTop: 8 },
+  dangerBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: theme.warning, backgroundColor: theme.warningBg },
+  deleteBtn: { borderColor: theme.error, backgroundColor: theme.errorBg },
+  disabledBtn: { opacity: 0.45 },
   dangerBtnText: { color: theme.warning, fontWeight: "800", fontSize: 13 },
   lockWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32, gap: 12 },
   lockTitle: { color: theme.text, fontSize: 22, fontWeight: "800" },
   lockSub: { color: theme.textSecondary, textAlign: "center", fontSize: 14 },
   modalWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
-  modalSheet: { backgroundColor: theme.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 32, maxHeight: "85%" },
+  modalSheet: { backgroundColor: theme.surface, borderTopLeftRadius: 12, borderTopRightRadius: 12, padding: 18, paddingBottom: 28, maxHeight: "85%" },
   modalHandle: { alignSelf: "center", width: 40, height: 4, backgroundColor: theme.border, borderRadius: 2, marginBottom: 12 },
   modalTitle: { color: theme.text, fontSize: 20, fontWeight: "800", marginBottom: 8 },
   formLabel: { color: theme.textSecondary, fontSize: 11, fontWeight: "700", letterSpacing: 1, textTransform: "uppercase", marginTop: 10, marginBottom: 4 },
-  formInput: { backgroundColor: theme.bg, borderWidth: 1, borderColor: theme.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: theme.text, fontSize: 14 },
-  modalBtn: { flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: "center" },
+  formInput: { backgroundColor: theme.bg, borderWidth: 1, borderColor: theme.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: theme.text, fontSize: 14 },
+  modalBtn: { flex: 1, paddingVertical: 14, borderRadius: 8, alignItems: "center" },
   modalBtnText: { color: "#fff", fontWeight: "800" },
 });
