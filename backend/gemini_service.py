@@ -78,7 +78,7 @@ def gemini_config() -> Dict[str, Any]:
         "configured": bool(api_key),
         "model": os.environ.get("GEMINI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         "timeout_seconds": float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "18")),
-        "min_confidence": float(os.environ.get("GEMINI_MIN_CONFIDENCE", "0.45")),
+        "min_confidence": float(os.environ.get("GEMINI_MIN_CONFIDENCE", "0.40")),
         "mode": os.environ.get("GEMINI_OCR_MODE", "auto").strip().lower() or "auto",
     }
 
@@ -172,6 +172,56 @@ def _parsed_from_gemini(payload: Dict[str, Any]) -> Dict[str, str]:
         "tipo_sangre": _clean_blood(_first_non_empty(payload, "tipo_sangre", "rh", "blood_type", "bloodType")),
         "formato_detectado": "gemini_vision",
     }
+
+
+PROMPT = """
+Eres un extractor estricto de cedulas de ciudadania colombianas.
+Analiza la imagen completa, sea frente o reverso, y responde UNICAMENTE JSON valido.
+No uses markdown, no expliques nada fuera del JSON.
+Version interna del criterio: cedula_colombia_v2_confianza_040.
+
+Si la imagen no parece una cedula colombiana o documento colombiano, responde:
+{"ok":false,"error":"no_es_documento_colombiano","confianza":0}
+
+Si es documento colombiano, responde exactamente con este esquema:
+{
+  "ok": true,
+  "cedula": "NUIP o numero de cedula sin puntos, espacios ni guiones",
+  "nombres": "NOMBRES EN MAYUSCULA o null",
+  "primer_apellido": "PRIMER APELLIDO EN MAYUSCULA o null",
+  "segundo_apellido": "SEGUNDO APELLIDO EN MAYUSCULA o null",
+  "fecha_nacimiento": "YYYYMMDD o null",
+  "fecha_expedicion": "YYYYMMDD o null",
+  "fecha_expiracion": "YYYYMMDD o null",
+  "genero": "M o F o null",
+  "tipo_sangre": "O+ / O- / A+ / A- / B+ / B- / AB+ / AB- o null",
+  "lugar_nacimiento": "CIUDAD o null",
+  "lugar_expedicion": "CIUDAD o null",
+  "confianza": 0.0
+}
+
+Reglas para el numero de cedula / NUIP:
+- Debe tener entre 5 y 11 digitos.
+- Nunca devuelvas fechas como cedula.
+- Nunca devuelvas numeros de tramite, seriales, consecutivos, codigos QR, digitos de control ni numeros parciales.
+- En el frente, prioriza el numero junto a etiquetas NUIP, C.C., Cedula, Numero, Documento o Identificacion.
+- Si el frente y el reverso muestran numeros distintos, usa el numero etiquetado como NUIP/Cedula o el numero completo del campo opcional MRZ colombiano.
+
+Reglas MRZ para reverso:
+- Acepta MRZ de 3 lineas con prefijos IDCOL, ID<COL, ICCOL o IC<COL.
+- En cedulas nuevas con ICCOL, NO uses el consecutivo corto de la primera linea.
+- Ejemplo: si ves "ICCOL000000012", NO devuelvas 12.
+- En cedula colombiana moderna, el NUIP real puede estar en la segunda linea despues de "COL".
+- Ejemplo de segunda linea: "8808213F3101300COL1234567890<9". En ese caso la cedula correcta es "1234567890".
+- Quita rellenos "<" y no incluyas el digito verificador MRZ final.
+- La tercera linea MRZ contiene apellidos y nombres. Usa el texto antes de "<<" para apellidos y despues de "<<" para nombres.
+
+Reglas de calidad:
+- Si el numero no se ve claro, responde ok=false con error "cedula_no_legible".
+- Si lees el numero pero no lees nombres o fechas, deja esos campos en null y conserva la cedula.
+- Devuelve confianza entre 0 y 1: usa 0.40-0.60 para lectura aceptable pero no perfecta, 0.70+ solo si el numero esta claro.
+- No inventes letras, fechas ni nombres.
+"""
 
 
 def analyze_cedula_with_gemini(
