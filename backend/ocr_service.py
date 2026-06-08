@@ -27,9 +27,10 @@ from typing import Optional, List, Tuple, Dict, Any
 from cedula_parser import parse_pdf417, parse_mrz_from_text
 
 try:
-    from gemini_service import analyze_cedula_with_gemini, should_use_gemini
+    from gemini_service import analyze_cedula_with_gemini, gemini_should_run_first, should_use_gemini
 except ImportError:  # pragma: no cover
     analyze_cedula_with_gemini = None  # type: ignore
+    gemini_should_run_first = None  # type: ignore
     should_use_gemini = None  # type: ignore
 
 try:
@@ -874,10 +875,17 @@ async def ocr_from_base64_async(data_uri_or_b64: str, force_gemini: bool = False
         return {"ok": False, "error": f"Base64 inválido: {e}", "cedula": "", "texto_completo": ""}
 
     gemini_available = bool(should_use_gemini and analyze_cedula_with_gemini and should_use_gemini({"cedula": ""}))
-    if force_gemini:
+    gemini_first = bool(gemini_should_run_first and gemini_should_run_first())
+    if force_gemini or gemini_first:
         if gemini_available:
             gemini_result = await _analyze_gemini_async(img_bytes)
             if gemini_result.get("cedula"):
+                confidence = float((gemini_result.get("gemini") or {}).get("confidence") or 0)
+                if _has_core_identity(gemini_result) and confidence >= 0.70:
+                    return gemini_result
+                local_result = await _ocr_cedula_with_mrz_async(img_bytes)
+                if local_result.get("cedula"):
+                    return _merge_ocr_gemini(local_result, gemini_result, prefer_gemini=True)
                 return gemini_result
             local_result = await _ocr_cedula_with_mrz_async(img_bytes)
             if local_result.get("cedula"):

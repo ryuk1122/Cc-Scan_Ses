@@ -271,3 +271,8 @@ def should_use_gemini(local_result: Dict[str, Any]) -> bool:
     parsed = local_result.get("parsed") or {}
     has_name = bool(parsed.get("nombres") or parsed.get("primer_apellido"))
     return not local_result.get("cedula") or not has_name
+
+
+def gemini_should_run_first() -> bool:
+    cfg = gemini_config()
+    return bool(cfg["enabled"] and cfg["mode"] in {"always", "first", "gemini_first", "primary"})
