@@ -137,7 +137,7 @@ export default function DashboardScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
             <View style={[styles.dot, { backgroundColor: statusColor }]} />
             <Text style={{ color: statusColor, fontWeight: "800", fontSize: 18 }}>
-              {wsStatus === "online" ? "Conectado en tiempo real" : wsStatus === "connecting" ? "Conectando..." : "Offline"}
+              {wsStatus === "online" ? "Conectado en tiempo real" : wsStatus === "connecting" ? "Conectando..." : "Sin tiempo real"}
             </Text>
           </View>
           <Text style={styles.statFoot}>

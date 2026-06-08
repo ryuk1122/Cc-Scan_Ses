@@ -252,6 +252,50 @@ def _fix_mrz_digits(value: str) -> str:
     return (value or "").upper().translate(MRZ_DIGIT_FIXES)
 
 
+def _score_mrz_name_suffix(value: str) -> float:
+    text = re.sub(r"[^A-ZÁÉÍÓÚÜÑ]", "", (value or "").upper())
+    if len(text) < 2:
+        return -99.0
+    vowels = sum(1 for c in text if c in "AEIOUÁÉÍÓÚÜ")
+    score = vowels * 3.0 + min(len(text), 12) * 0.2
+    if re.match(r"^[BCDFGHJKLMNPQRSTVWXYZ][AEIOUÁÉÍÓÚÜ]", text):
+        score += 0.6
+    if re.match(r"^[BCDFGHJKLMNPQRSTVWXYZ]{3,}", text):
+        score -= 6.0
+    leading_filler = re.match(r"^[TSILKCF]+", text)
+    if leading_filler and len(text) > 8:
+        score -= len(leading_filler.group(0)) * 2.0
+    if re.search(r"(SS|II|LL|TT|KK|CC|FF)", text[:6]):
+        score -= 3.0
+    if re.search(r"(.)\1{2,}", text):
+        score -= 4.0
+    return score
+
+
+def _clean_mrz_name_token(value: str) -> str:
+    text = re.sub(r"[^A-ZÁÉÍÓÚÜÑ]", "", (value or "").upper())
+    if len(text) <= 8:
+        return text
+    prefix = text[:10]
+    # OCR a veces convierte muchos '<' de relleno antes del nombre en T/S/I/L/K/C/F.
+    if not re.match(r"^[TSILKCF]{4,}", prefix) and not re.search(r"([TSILKCF])\1{2,}", prefix):
+        return text
+
+    original_score = _score_mrz_name_suffix(text)
+    best = text
+    best_score = original_score
+    for i in range(3, len(text) - 1):
+        junk = text[:i]
+        suffix = text[i:]
+        if len(suffix) < 2 or not all(c in "TSILKCF" for c in junk):
+            continue
+        score = _score_mrz_name_suffix(suffix) + min(i, 10) * 0.35
+        if score > best_score + 0.3:
+            best = suffix
+            best_score = score
+    return best
+
+
 def _candidate_mrz_lines(raw: str) -> List[str]:
     lines: List[str] = []
     for line in re.split(r"[\r\n]+", (raw or "").upper()):
@@ -351,13 +395,15 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
     name_line = l3.replace("0", "O").rstrip("<")
     if "<<" in name_line:
         last_block, first_block = name_line.split("<<", 1)
-        last_parts = [p for p in last_block.split("<") if p]
-        first_parts = [p for p in first_block.split("<") if p]
+        last_parts = [_clean_mrz_name_token(p) for p in last_block.split("<") if p]
+        first_parts = [_clean_mrz_name_token(p) for p in first_block.split("<") if p]
+        first_parts = [p for p in first_parts if p]
         out["primer_apellido"] = last_parts[0] if last_parts else ""
         out["segundo_apellido"] = " ".join(last_parts[1:])
         out["nombres"] = " ".join(first_parts)
     else:
-        name_parts = [p for p in name_line.split("<") if p]
+        name_parts = [_clean_mrz_name_token(p) for p in name_line.split("<") if p]
+        name_parts = [p for p in name_parts if p]
         if name_parts:
             out["primer_apellido"] = name_parts[0]
         if len(name_parts) > 1:

@@ -75,6 +75,15 @@ agenthub/agents/youtube/db
 
 # Build caches
 .cache/
+.expo/
+**/.expo/
+**/.metro-cache/
+**/.pytest_cache/
+**/__pycache__/
+frontend/android/.gradle/
+frontend/android/build/
+frontend/android/app/build/
+backend/.mongo-data/
 
 memory/test_credentials.md
 

@@ -361,7 +361,7 @@ export default function AdminScreen() {
                 </View>
                 <View style={styles.kpiCard}>
                   <View style={styles.kpiHeader}>
-                    <Ionicons name="calendar-check" size={18} color={theme.success} />
+                    <Ionicons name="calendar-outline" size={18} color={theme.success} />
                     <Text style={styles.kpiLabel}>Eventos</Text>
                   </View>
                   <Text style={styles.kpiValue}>{fmt(metrics?.global.eventos)}</Text>

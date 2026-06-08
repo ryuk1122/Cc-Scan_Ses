@@ -105,6 +105,41 @@ function cleanTextField(value: string): string {
   return text.length >= 2 ? text : "";
 }
 
+function scoreMrzNameSuffix(value: string): number {
+  const text = String(value || "").toUpperCase().replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "");
+  if (text.length < 2) return -99;
+  const vowels = (text.match(/[AEIOUÁÉÍÓÚÜ]/g) || []).length;
+  let score = vowels * 3 + Math.min(text.length, 12) * 0.2;
+  if (/^[BCDFGHJKLMNPQRSTVWXYZ][AEIOUÁÉÍÓÚÜ]/.test(text)) score += 0.6;
+  if (/^[BCDFGHJKLMNPQRSTVWXYZ]{3,}/.test(text)) score -= 6;
+  const leadingFiller = text.match(/^[TSILKCF]+/);
+  if (leadingFiller && text.length > 8) score -= leadingFiller[0].length * 2;
+  if (/(SS|II|LL|TT|KK|CC|FF)/.test(text.slice(0, 6))) score -= 3;
+  if (/(.)\1{2,}/.test(text)) score -= 4;
+  return score;
+}
+
+function cleanMrzNameToken(value: string): string {
+  const text = String(value || "").toUpperCase().replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "");
+  if (text.length <= 8) return text;
+  const prefix = text.slice(0, 10);
+  if (!/^[TSILKCF]{4,}/.test(prefix) && !/([TSILKCF])\1{2,}/.test(prefix)) return text;
+
+  let best = text;
+  let bestScore = scoreMrzNameSuffix(text);
+  for (let i = 3; i < text.length - 1; i += 1) {
+    const junk = text.slice(0, i);
+    const suffix = text.slice(i);
+    if (suffix.length < 2 || !/^[TSILKCF]+$/.test(junk)) continue;
+    const score = scoreMrzNameSuffix(suffix) + Math.min(i, 10) * 0.35;
+    if (score > bestScore + 0.3) {
+      best = suffix;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 function rawToBytes(raw: string): number[] {
   return String(raw || "").split("").map((char) => char.charCodeAt(0) & 0xff);
 }
@@ -326,13 +361,13 @@ export function parseMrz(raw: string | null | undefined): ParsedCedula {
   out.nacionalidad = l2.slice(15, 18).replace(/0/g, "O").replace(/1/g, "I");
   if (nameLine.includes("<<")) {
     const [lastBlock, firstBlock] = nameLine.split("<<", 2);
-    const lastParts = lastBlock.split("<").filter(Boolean);
-    const firstParts = firstBlock.split("<").filter(Boolean);
+    const lastParts = lastBlock.split("<").map(cleanMrzNameToken).filter(Boolean);
+    const firstParts = firstBlock.split("<").map(cleanMrzNameToken).filter(Boolean);
     out.primer_apellido = lastParts[0] || "";
     out.segundo_apellido = lastParts.slice(1).join(" ");
     out.nombres = firstParts.join(" ");
   } else {
-    const names = nameLine.split("<").filter(Boolean);
+    const names = nameLine.split("<").map(cleanMrzNameToken).filter(Boolean);
     out.primer_apellido = names[0] || "";
     out.segundo_apellido = names[1] || "";
     out.nombres = names.slice(2).join(" ");

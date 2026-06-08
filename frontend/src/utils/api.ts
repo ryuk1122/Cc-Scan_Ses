@@ -10,6 +10,7 @@ const rawBase =
   "";
 const BASE = rawBase.replace(/\/+$/, "");
 const TOKEN_KEY = "cs_token";
+const API_TIMEOUT_MS = 45000;
 
 export type ApiError = { status: number; detail: any };
 
@@ -41,7 +42,16 @@ async function request<T>(path: string, options: RequestInit = {}, withAuth = tr
     if (t) headers["Authorization"] = `Bearer ${t}`;
   }
   const url = `${BASE}/api${path}`;
-  const res = await fetch(url, { ...options, headers });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, { ...options, headers, signal: controller.signal });
+  } catch (error: any) {
+    throw { status: 0, detail: error?.name === "AbortError" ? "Tiempo de espera agotado" : "No hay conexion con el backend" } as ApiError;
+  } finally {
+    clearTimeout(timeout);
+  }
   const text = await res.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
@@ -63,7 +73,8 @@ export const api = {
   listEventos: () => request<any[]>("/eventos"),
   createEvento: (body: { nombre: string; fecha: string; lugar?: string; descripcion?: string }) =>
     request<any>("/eventos", { method: "POST", body: JSON.stringify(body) }),
-  deleteEvento: (id: string) => request<any>(`/eventos/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deleteEvento: (id: string) =>
+    request<any>(`/eventos/${encodeURIComponent(id)}?confirm=${encodeURIComponent(id)}`, { method: "DELETE" }),
   getEvento: (id: string) => request<any>(`/eventos/${id}`),
   estado: (id: string) => request<any>(`/eventos/${id}/estado`),
   registros: (id: string) => request<any[]>(`/eventos/${id}/registros`),
@@ -81,7 +92,8 @@ export const api = {
     request<any>(`/admin/afiliados/${encodeURIComponent(cedula)}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteAfiliado: (cedula: string) =>
     request<any>(`/admin/afiliados/${encodeURIComponent(cedula)}`, { method: "DELETE" }),
-  wipeAfiliados: () => request<any>("/admin/afiliados", { method: "DELETE" }),
+  wipeAfiliados: () =>
+    request<any>("/admin/afiliados?confirm=BORRAR_AFILIADOS", { method: "DELETE" }),
 
   // Escaneo
   escanear: (body: any, idempotencyKey: string) =>
@@ -92,15 +104,15 @@ export const api = {
     }),
 
   // OCR del frente
-  ocrCedula: (imageBase64: string) =>
+  ocrCedula: (imageBase64: string, options: { forceGemini?: boolean } = {}) =>
     request<{ ok: boolean; cedula: string; texto_completo?: string; pipeline_usado?: string; gemini?: any; afiliado: any; parsed?: any; raw_mrz?: string[]; mrz_valido?: boolean; error?: string }>(
       "/ocr/cedula",
-      { method: "POST", body: JSON.stringify({ image_base64: imageBase64 }) },
+      { method: "POST", body: JSON.stringify({ image_base64: imageBase64, force_gemini: !!options.forceGemini }) },
     ),
-  barcodeCedula: (imageBase64: string) =>
+  barcodeCedula: (imageBase64: string, options: { preferMrz?: boolean } = {}) =>
     request<{ ok: boolean; cedula: string; raw: string; parsed?: any; format?: string; source?: string; raw_mrz?: string[]; mrz_valido?: boolean; candidates?: string[]; afiliado: any; error?: string }>(
       "/barcode/cedula",
-      { method: "POST", body: JSON.stringify({ image_base64: imageBase64 }) },
+      { method: "POST", body: JSON.stringify({ image_base64: imageBase64, prefer_mrz: !!options.preferMrz }) },
     ),
 
   // Admin registros
@@ -112,7 +124,10 @@ export const api = {
       { method: "DELETE" },
     ),
   clearEventoRegistros: (eventoId: string) =>
-    request<any>(`/eventos/${encodeURIComponent(eventoId)}/registros`, { method: "DELETE" }),
+    request<any>(
+      `/eventos/${encodeURIComponent(eventoId)}/registros?confirm=${encodeURIComponent(eventoId)}`,
+      { method: "DELETE" },
+    ),
 
   // Exportaci?n: devuelve una URL completa con el token para abrirla en el navegador
   exportUrl: async (eventoId: string) => {

@@ -55,6 +55,7 @@
     },
     "extra": {
       "router": {},
+      "backendUrl": "https://cc-scanses-production.up.railway.app",
       "eas": {
         "projectId": "c0fe06f8-c0d4-4bda-9286-01eff5ac9800"
       }

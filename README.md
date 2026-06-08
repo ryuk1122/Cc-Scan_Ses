@@ -42,6 +42,46 @@ GET /api/health/dependencies
 
 Si el OCR no lee imágenes en producción, abre `/api/health/dependencies` en el backend publicado. Debe reportar `pytesseract: true`, `tesseract_available: true`, `zxingcpp: true`, `opencv: true` y `numpy: true`. Para despliegues tipo Render/Railway que acepten Docker, usa `backend/Dockerfile`; instala Tesseract, OpenCV y el idioma español dentro de la imagen.
 
+## Railway
+
+El backend esta preparado para Railway con `railway.json` y `Dockerfile.railway`.
+El contenedor escucha el `PORT` que inyecta Railway y no copia Android, `node_modules`, `.env`, `.mongo-data` ni caches.
+
+Proyecto Railway:
+
+```bash
+npx --yes @railway/cli link -p 0fa5559c-85e6-4d16-94f1-fb88e1a6741a
+npx --yes @railway/cli up --project 0fa5559c-85e6-4d16-94f1-fb88e1a6741a
+```
+
+Variables requeridas en Railway:
+
+```env
+MONGO_URL=<mongodb de produccion>
+DB_NAME=cedulascan
+JWT_SECRET_KEY=<secreto largo>
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_HOURS=12
+BCRYPT_ROUNDS=10
+ADMIN_EMAIL=<admin real>
+ADMIN_PASSWORD=<password inicial>
+CORS_ORIGINS=*
+GEMINI_ENABLED=auto
+GEMINI_API_KEY=<api key>
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_OCR_MODE=auto
+GEMINI_MIN_CONFIDENCE=0.45
+GEMINI_TIMEOUT_SECONDS=18
+ALLOW_WIPE_AFILIADOS=false
+```
+
+Despues de publicar Railway, recompila Android con la URL publica del backend:
+
+```bash
+cd frontend
+EXPO_PUBLIC_BACKEND_URL=https://tu-servicio.up.railway.app npm run android
+```
+
 ## Frontend
 
 Variable requerida:

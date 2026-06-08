@@ -100,3 +100,48 @@ def test_parse_new_colombian_iccol_mrz_uses_nuip_line2():
     assert parsed["fecha_expiracion"] == "2032-03-19"
     assert parsed["nacionalidad"] == "COL"
     assert parsed["mrz_valido"] is True
+
+
+def test_parse_new_colombian_iccol_mrz_from_photo_example_prefers_line2_nuip():
+    raw = "\n".join([
+        "ICCOL000000012<<<<<<<<<<<<<<<",
+        "8808213F3101300COL1234567890<9",
+        "WALTEROS<<<<<<<<<<<<<<<<LAURA",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["nombres"] == "LAURA"
+    assert parsed["fecha_nacimiento"] == "1988-08-21"
+    assert parsed["fecha_expiracion"] == "2031-01-30"
+
+
+def test_parse_new_colombian_iccol_mrz_cleans_ocr_filler_before_given_name():
+    raw = "\n".join([
+        "ICCOLO00000012<<<<<<<<K<<<<",
+        "8808213F3101300C0L1234567890<9",
+        "WALTEROS<<<<<TSSSISSLKLAURA",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["nombres"] == "LAURA"
+    assert parsed["fecha_nacimiento"] == "1988-08-21"
+
+
+def test_parse_new_colombian_iccol_mrz_cleans_cf_ocr_filler_before_given_name():
+    raw = "\n".join([
+        "ICCOLO00000012<<<<<<<<K<<<<",
+        "8808213F3101300C0L1234567890<9",
+        "WALTEROS<<<<<FSCCCCCCCLAURA",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["nombres"] == "LAURA"

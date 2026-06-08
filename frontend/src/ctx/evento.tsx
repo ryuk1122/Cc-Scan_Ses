@@ -85,6 +85,18 @@ type QueueItem = {
   attempts: number;
 };
 
+function shouldQueueAfterError(err: any): boolean {
+  const status = Number(err?.status || 0);
+  return status === 0 || status === 408 || status === 502 || status === 503 || status === 504;
+}
+
+function scanErrorMessage(err: any, fallback: string): string {
+  const detail = err?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (typeof detail?.detail === "string" && detail.detail.trim()) return detail.detail;
+  return fallback;
+}
+
 export function EventoProvider({ children }: { children: ReactNode }) {
   const { token } = useSession();
   const [eventoId, setEventoId] = useState<string | null>(null);
@@ -402,7 +414,11 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           setDuplicadosBloqueados((n) => n + 1);
           return { ok: false, duplicate: true, mensaje: `Atención: ya registrado: ${cedula}` };
         }
-        // Sin conexión -> encolar
+        if (!shouldQueueAfterError(err)) {
+          return { ok: false, mensaje: scanErrorMessage(err, "No se pudo registrar") };
+        }
+
+        // Sin conexion o backend temporalmente no disponible -> encolar
         const q = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
         q.push({ ...payload, idempotency_key, attempts: 0 });
         await storage.setItem(QUEUE_KEY, q);
@@ -422,7 +438,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           created_at: new Date().toISOString(),
         });
         setLastSuccess({ cedula, ts: Date.now() });
-        return { ok: true, mensaje: "En cola (offline). Se sincronizará." };
+        return { ok: true, mensaje: "En cola de sincronizacion. Se enviara cuando vuelva la conexion." };
       }
     },
     [eventoId, addRegistro],

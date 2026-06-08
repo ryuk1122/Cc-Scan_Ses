@@ -3,13 +3,28 @@ from __future__ import annotations
 import base64
 import io
 import re
+import urllib.parse
 from typing import Any, Dict, List
 
 from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 
 from cedula_parser import extract_cedula, parse_pdf417, parse_pdf417_bytes
 
-QR_IDENTITY_HINT_RE = re.compile(r"C[EÉ]DULA|CC|NUIP|DOCUMENTO|NUMERO|NÚMERO|IDENTIFIC", re.IGNORECASE)
+QR_IDENTITY_HINT_RE = re.compile(
+    r"REGISTRADURIA|WSP\.REGISTRADURIA|CEDULADIGITAL|C[EÉ]DULA|CC|NUIP|DOCUMENTO|DOC|NUMERO|NÚMERO|IDENTIFIC|DOCUMENT_NUMBER|DOCUMENTNUMBER|NUMERO_DOCUMENTO",
+    re.IGNORECASE,
+)
+QR_ID_KEY_RE = re.compile(
+    r"(?:^|[?&#;,\s{\[\"'])\s*"
+    r"(?:nuip|cedula|c[eé]dula|cc|doc|documento|document_number|documentnumber|numero_documento|n[uú]mero|numero|nro|no|identificacion|identificaci[oó]n|id)"
+    r"\s*[\"']?\s*[:=/#-]\s*[\"']?([0-9][0-9\s.,-]{3,20}[0-9])",
+    re.IGNORECASE,
+)
+QR_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Z0-9])(?:CC|NUIP|DOC|CEDULA|DOCUMENTO|ID)\s*[:#-]?\s*([0-9][0-9\s.,-]{3,20}[0-9])(?:[^0-9]|$)",
+    re.IGNORECASE,
+)
+QR_DIGIT_RUN_RE = re.compile(r"(?<!\d)(\d[\d\s.,-]{3,20}\d)(?!\d)")
 
 try:
     import zxingcpp
@@ -39,6 +54,67 @@ def _decode_b64(data_uri_or_b64: str) -> bytes:
     if data.startswith("data:") and "," in data:
         data = data.split(",", 1)[1]
     return base64.b64decode(data + "==", validate=False)
+
+
+def _clean_qr_digits(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or "")).lstrip("0")
+    if not re.fullmatch(r"\d{5,11}", digits or ""):
+        return ""
+    if re.fullmatch(r"(?:19|20)\d{2}", digits) or re.fullmatch(r"(?:19|20)\d{6}", digits):
+        return ""
+    return digits
+
+
+def _best_qr_digit_candidate(value: str) -> str:
+    candidates: List[tuple[str, float]] = []
+    for match in QR_DIGIT_RUN_RE.finditer(value or ""):
+        digits = _clean_qr_digits(match.group(1))
+        if not digits:
+            continue
+        length_score = {10: 12, 9: 11, 8: 10, 7: 9, 11: 7, 6: 5, 5: 4}.get(len(digits), 1)
+        candidates.append((digits, length_score + match.start() / max(len(value), 1)))
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    return candidates[0][0] if candidates else ""
+
+
+def extract_qr_identity_number(raw: str) -> str:
+    original = str(raw or "").strip()
+    if not original:
+        return ""
+
+    variants: List[str] = []
+    for value in (
+        original,
+        urllib.parse.unquote(original),
+        original.replace("&amp;", "&"),
+        urllib.parse.unquote(original.replace("&amp;", "&")),
+    ):
+        if value and value not in variants:
+            variants.append(value)
+
+    for value in variants:
+        direct = _clean_qr_digits(value)
+        if direct:
+            return direct
+
+        key_match = QR_ID_KEY_RE.search(value)
+        if key_match:
+            digits = _clean_qr_digits(key_match.group(1))
+            if digits:
+                return digits
+
+        prefixed = QR_PREFIX_RE.search(value)
+        if prefixed:
+            digits = _clean_qr_digits(prefixed.group(1))
+            if digits:
+                return digits
+
+        if re.search(r"registraduria\.gov\.co|wsp\.registraduria|ceduladigital|cedula", value, re.IGNORECASE):
+            digits = _best_qr_digit_candidate(value)
+            if digits:
+                return digits
+
+    return ""
 
 
 def _barcode_raw(result: Any) -> tuple[str, bytes]:
@@ -82,6 +158,11 @@ def _qr_crop_candidates(image: Image.Image) -> List[Image.Image]:
         (int(w * 0.48), 0, w, int(h * 0.48)),
         (int(w * 0.42), 0, w, int(h * 0.58)),
         (int(w * 0.55), int(h * 0.04), int(w * 0.98), int(h * 0.45)),
+        (int(w * 0.55), int(h * 0.45), int(w * 0.98), int(h * 0.98)),
+        (int(w * 0.40), int(h * 0.25), int(w * 0.98), int(h * 0.78)),
+        (int(w * 0.05), int(h * 0.05), int(w * 0.50), int(h * 0.50)),
+        (int(w * 0.05), int(h * 0.45), int(w * 0.50), int(h * 0.98)),
+        (int(w * 0.20), int(h * 0.20), int(w * 0.80), int(h * 0.80)),
         (0, 0, w, int(h * 0.62)),
         (int(w * 0.35), 0, w, h),
         (0, 0, w, h),
@@ -145,25 +226,14 @@ def _opencv_variants(image: Image.Image) -> List[Image.Image]:
 def _variants(image: Image.Image) -> List[Image.Image]:
     base = ImageOps.exif_transpose(image).convert("RGB")
     variants: List[Image.Image] = []
-    for crop in _crop_candidates(base):
-        for angle in (0, 90, 180, 270):
-            rotated = crop if angle == 0 else crop.rotate(angle, expand=True)
-            for scale in (1, 2, 3):
-                scaled = rotated
-                if scale > 1:
-                    if max(rotated.width * scale, rotated.height * scale) > 3600:
-                        continue
-                    scaled = rotated.resize((rotated.width * scale, rotated.height * scale), Image.Resampling.LANCZOS)
-                variants.append(scaled)
-                gray = ImageOps.autocontrast(ImageOps.grayscale(scaled), cutoff=2)
-                variants.append(gray)
-                high = ImageEnhance.Contrast(gray).enhance(2.8)
-                variants.append(high)
-                sharp = high.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN)
-                variants.append(sharp)
-                threshold = sharp.point(lambda x: 0 if x < 145 else 255, "1").convert("L")
-                variants.append(threshold)
-    variants.extend(_opencv_variants(base))
+    for crop in _crop_candidates(base)[:4]:
+        variants.append(crop)
+        gray = ImageOps.autocontrast(ImageOps.grayscale(crop), cutoff=2)
+        variants.append(gray)
+        high = ImageEnhance.Contrast(gray).enhance(2.3)
+        variants.append(high)
+        threshold = high.point(lambda x: 0 if x < 145 else 255, "1").convert("L")
+        variants.append(threshold)
     return variants
 
 
@@ -197,16 +267,20 @@ def _decode_qr_from_image(image: Image.Image) -> dict:
                 continue
             seen.add(raw)
             all_raw.append(raw)
+            qr_cedula = extract_qr_identity_number(raw)
             parsed = parse_pdf417(raw)
-            cedula = parsed.get("cedula") or extract_cedula(raw) or ""
+            cedula = parsed.get("cedula") or qr_cedula or extract_cedula(raw) or ""
             has_identity_hint = (
-                "IDCOL" in raw
+                bool(qr_cedula)
+                or "IDCOL" in raw
                 or "<<" in raw
                 or "|" in raw
                 or QR_IDENTITY_HINT_RE.search(raw)
                 or str(parsed.get("formato_detectado") or "") not in ("", "desconocido", "numero_puro")
             )
             if cedula and has_identity_hint:
+                if qr_cedula and not parsed.get("cedula"):
+                    parsed["cedula"] = qr_cedula
                 parsed["formato_detectado"] = parsed.get("formato_detectado") or "qr"
                 return {
                     "ok": True,
@@ -236,16 +310,7 @@ def decode_qr_from_base64(image_base64: str) -> dict:
     return _decode_qr_from_image(image)
 
 
-def decode_identity_document_from_base64(image_base64: str) -> dict:
-    pdf417 = decode_barcode_from_base64(image_base64)
-    if pdf417.get("cedula"):
-        pdf417["source"] = "pdf417"
-        return pdf417
-
-    qr = decode_qr_from_base64(image_base64)
-    if qr.get("cedula"):
-        return qr
-
+def _decode_mrz_from_base64(image_base64: str) -> dict:
     try:
         from ocr_service import ocr_mrz_cedula
 
@@ -264,10 +329,26 @@ def decode_identity_document_from_base64(image_base64: str) -> dict:
             "parsed": parsed,
             "format": "MRZ",
             "source": "mrz_ocr",
-            "candidates": [qr.get("raw")] if qr.get("raw") else [],
+            "candidates": [],
             "raw_mrz": raw_mrz,
             "mrz_valido": bool(parsed.get("mrz_valido")),
         }
+    return mrz
+
+
+def decode_identity_document_from_base64(image_base64: str, prefer_mrz: bool = False) -> dict:
+    qr = decode_qr_from_base64(image_base64)
+    if qr.get("cedula"):
+        return qr
+
+    mrz = _decode_mrz_from_base64(image_base64)
+    if mrz.get("cedula"):
+        return mrz
+
+    pdf417 = decode_barcode_from_base64(image_base64)
+    if pdf417.get("cedula"):
+        pdf417["source"] = "pdf417"
+        return pdf417
 
     return {
         "ok": False,
@@ -284,31 +365,26 @@ def decode_identity_document_from_base64(image_base64: str) -> dict:
 
 
 def decode_barcode_from_base64(image_base64: str) -> dict:
-    print("\n[DEV-DEBUG] --- NUEVA PETICIÓN DE ESCANEO RECIBIDA ---")
-    
     try:
         img_bytes = _decode_b64(image_base64)
         image = Image.open(io.BytesIO(img_bytes))
         image.load()
     except Exception as exc:
-        print(f"[DEV-DEBUG] ❌ Error abriendo imagen: {exc}")
         return {"ok": False, "error": f"No se pudo abrir la imagen: {exc}", "raw": "", "cedula": "", "parsed": {}}
 
-    # 🚀 ULTRA-OPTIMIZACIÓN: Reducir el tamaño de la imagen si es gigantesca.
+    # Reducir fotos grandes evita lecturas lentas e inestables en ZXing.
     # Las fotos de cámaras modernas (3000px o más) saturan y confunden a ZXing.
     # Una anchura máxima de 1000px a 1200px es el punto dulce para PDF417.
     MAX_WIDTH = 1200
     if image.width > MAX_WIDTH:
         ratio = MAX_WIDTH / float(image.width)
         new_height = int(float(image.height) * ratio)
-        print(f"[DEV-DEBUG] 📏 Redimensionando imagen gigante de {image.width}x{image.height} a {MAX_WIDTH}x{new_height}")
         image = image.resize((MAX_WIDTH, new_height), Image.Resampling.LANCZOS)
 
     seen: set[str] = set()
     all_raw: List[str] = []
 
-    # 1. Intento rápido sobre la imagen normalizada
-    print("[DEV-DEBUG] Intentando decodificación rápida en la imagen optimizada...")
+    # 1. Intento rápido sobre la imagen normalizada.
     try:
         results = zxingcpp.read_barcodes(
             image,
@@ -317,25 +393,21 @@ def decode_barcode_from_base64(image_base64: str) -> dict:
             try_downscale=True,  # Activamos el escalado interno de ZXing
         )
     except Exception as e:
-        print(f"[DEV-DEBUG] Error en intento rápido: {e}")
         results = []
 
     if results:
-        print("[DEV-DEBUG] ⚡ ¡Decodificación rápida exitosa en milisegundos!")
         for result in results:
             raw, raw_bytes = _barcode_raw(result)
             if raw:
                 parsed = parse_pdf417_bytes(raw_bytes, raw) if raw_bytes else parse_pdf417(raw)
                 cedula = parsed.get("cedula") or extract_cedula(raw) or ""
                 if cedula:
-                    print(f"[DEV-DEBUG] ✅ ÉXITO INMEDIATO: {cedula}")
                     return {
                         "ok": True, "raw": raw, "cedula": cedula, "parsed": parsed,
                         "format": str(getattr(result, "format", "")), "candidates": [raw]
                     }
 
     # 2. Pipeline de filtros ultraligero (solo si el primero falla)
-    print("[DEV-DEBUG] La optimizada falló. Ejecutando filtros ligeros en cascada...")
     for i, variant in enumerate(_variants(image)):
         # Si la variante es muy grande, también la controlamos
         try:
@@ -358,13 +430,11 @@ def decode_barcode_from_base64(image_base64: str) -> dict:
             parsed = parse_pdf417_bytes(raw_bytes, raw) if raw_bytes else parse_pdf417(raw)
             cedula = parsed.get("cedula") or extract_cedula(raw) or ""
             if cedula:
-                print(f"[DEV-DEBUG] ✅ Cédula recuperada en filtro {i}: {cedula}")
                 return {
                     "ok": True, "raw": raw, "cedula": cedula, "parsed": parsed,
                     "format": str(getattr(result, "format", "")), "candidates": all_raw[:5],
                 }
 
-    print("[DEV-DEBUG] ❌ No se pudo decodificar.")
     return {
         "ok": False, "error": "No se detectó PDF417 válido", "raw": "", "cedula": "", "parsed": {}, "candidates": all_raw[:5]
     }

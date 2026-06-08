@@ -7,10 +7,10 @@ App Expo/React Native para registrar asistencia por cédula.
 Crea `.env` desde `.env.example`:
 
 ```env
-EXPO_PUBLIC_BACKEND_URL=https://tu-backend-publicado.com
+EXPO_PUBLIC_BACKEND_URL=https://tu-servicio.up.railway.app
 ```
 
-En desarrollo LAN puedes usar una IP local si el celular está en la misma red. En builds de nube/EAS usa siempre la URL pública HTTPS del backend.
+En desarrollo LAN puedes usar una IP local si el celular está en la misma red. En builds de nube/EAS usa siempre la URL pública HTTPS del backend en Railway.
 
 ## Comandos
 

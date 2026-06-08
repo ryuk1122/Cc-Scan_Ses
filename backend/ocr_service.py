@@ -496,6 +496,14 @@ def ocr_cedula(image_bytes: bytes) -> dict:
     try:
         original = Image.open(io.BytesIO(image_bytes))
         original.load()
+        original = ImageOps.exif_transpose(original).convert("RGB")
+        max_side = 2200
+        if max(original.size) > max_side:
+            ratio = max_side / float(max(original.size))
+            original = original.resize(
+                (max(1, int(original.width * ratio)), max(1, int(original.height * ratio))),
+                Image.Resampling.LANCZOS,
+            )
     except Exception as e:
         return {
             "ok": False,
@@ -572,7 +580,7 @@ def _mrz_crop_candidates(img: "Image.Image") -> List["Image.Image"]:
     base = ImageOps.exif_transpose(img).convert("RGB")
     crops: List["Image.Image"] = []
     seen: set[tuple[int, int, int, int, int]] = set()
-    for angle in (0, 90, 180, 270):
+    for angle in (0, 180):
         rotated = base if angle == 0 else base.rotate(angle, expand=True)
         w, h = rotated.size
         boxes = [
@@ -583,9 +591,7 @@ def _mrz_crop_candidates(img: "Image.Image") -> List["Image.Image"]:
             (0, int(h * 0.42), w, h),
             (int(w * 0.03), int(h * 0.52), int(w * 0.97), int(h * 0.98)),
             # Fallback imagen completa
-            (0, 0, w, h),
             # Extra: solo zona baja absoluta (cédulas con MRZ muy al fondo)
-            (0, int(h * 0.62), w, h),
         ]
         for box in boxes:
             left, top, right, bottom = box
@@ -601,7 +607,7 @@ def _mrz_crop_candidates(img: "Image.Image") -> List["Image.Image"]:
 
 def _preprocess_mrz(img: "Image.Image") -> List["Image.Image"]:
     gray = _to_gray(img)
-    target_width = 2200
+    target_width = 1800
     if gray.width < target_width:
         scale = target_width / max(gray.width, 1)
         gray = gray.resize((target_width, max(1, int(gray.height * scale))), Image.LANCZOS)
@@ -611,7 +617,7 @@ def _preprocess_mrz(img: "Image.Image") -> List["Image.Image"]:
     high = ImageEnhance.Contrast(sharp).enhance(2.4)
     threshold = _otsu_threshold(high)
     binary = high.point(lambda x: 0 if x < threshold else 255, "1").convert("L")
-    variants = [gray, sharp, high, binary, ImageOps.invert(binary)]
+    variants = [gray, high, binary]
 
     if cv2 is not None and np is not None:
         arr = np.array(gray)
@@ -624,7 +630,7 @@ def _preprocess_mrz(img: "Image.Image") -> List["Image.Image"]:
             35,
             9,
         )
-        variants.extend([Image.fromarray(clahe), Image.fromarray(adaptive), ImageOps.invert(Image.fromarray(adaptive))])
+        variants.extend([Image.fromarray(clahe), Image.fromarray(adaptive)])
 
     return variants
 
@@ -725,7 +731,129 @@ def ocr_from_base64(data_uri_or_b64: str) -> dict:
     return ocr_cedula(img_bytes)
 
 
-async def ocr_from_base64_async(data_uri_or_b64: str) -> dict:
+def _has_core_identity(result: dict) -> bool:
+    parsed = result.get("parsed") or {}
+    return bool(_clean_doc_number(result.get("cedula")) and (parsed.get("nombres") or parsed.get("primer_apellido")))
+
+
+def _clean_doc_number(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or "")).lstrip("0")
+    if not re.fullmatch(r"\d{5,11}", digits or ""):
+        return ""
+    if re.fullmatch(r"(?:19|20)\d{2}", digits) or re.fullmatch(r"(?:19|20)\d{6}", digits):
+        return ""
+    return digits
+
+
+def _has_mrz_identity(result: dict) -> bool:
+    parsed = result.get("parsed") or {}
+    return bool(result.get("raw_mrz") or parsed.get("raw_mrz") or result.get("mrz_valido") or parsed.get("mrz_valido"))
+
+
+def _best_identity_number(local: dict, gemini: dict, prefer_gemini: bool) -> str:
+    local_parsed = local.get("parsed") or {}
+    gemini_parsed = gemini.get("parsed") or {}
+    local_doc = _clean_doc_number(local.get("cedula") or local_parsed.get("cedula"))
+    gemini_doc = _clean_doc_number(gemini.get("cedula") or gemini_parsed.get("cedula"))
+
+    if local_doc and _has_mrz_identity(local):
+        return local_doc
+    if prefer_gemini and gemini_doc:
+        return gemini_doc
+    if local_doc:
+        return local_doc
+    return gemini_doc
+
+
+def _merge_ocr_gemini(local_result: dict, gemini_result: dict, prefer_gemini: bool) -> dict:
+    local = local_result or {}
+    gemini = gemini_result or {}
+    local_parsed = local.get("parsed") or {}
+    gemini_parsed = gemini.get("parsed") or {}
+    merged_parsed = dict(gemini_parsed if prefer_gemini else local_parsed)
+    supplemental = local_parsed if prefer_gemini else gemini_parsed
+    for key, value in supplemental.items():
+        if value and not merged_parsed.get(key):
+            merged_parsed[key] = value
+
+    primary = gemini if prefer_gemini else local
+    secondary = local if prefer_gemini else gemini
+    cedula = _best_identity_number(local, gemini, prefer_gemini)
+    if cedula:
+        merged_parsed["cedula"] = cedula
+    pipeline = (
+        "gemini_vision+ocr_local"
+        if prefer_gemini and local
+        else "gemini_vision"
+        if prefer_gemini
+        else f"{local.get('pipeline_usado') or 'ocr_local'}+gemini"
+    )
+
+    if prefer_gemini:
+        texto_completo = gemini.get("texto_completo") or local.get("texto_completo") or ""
+    else:
+        texto_completo = local.get("texto_completo") or gemini.get("texto_completo") or ""
+
+    return {
+        **local,
+        "ok": True,
+        "cedula": cedula,
+        "texto_completo": texto_completo,
+        "pipeline_usado": pipeline,
+        "parsed": merged_parsed,
+        "gemini": gemini.get("gemini") or {},
+    }
+
+
+def _merge_local_ocr_mrz(local_result: dict, mrz_result: dict) -> dict:
+    local = local_result or {}
+    mrz = mrz_result or {}
+    if not mrz.get("cedula"):
+        return local
+
+    local_parsed = local.get("parsed") or {}
+    mrz_parsed = mrz.get("parsed") or {}
+    merged_parsed = dict(local_parsed)
+    for key, value in mrz_parsed.items():
+        if value and (not merged_parsed.get(key) or key in {"cedula", "primer_apellido", "segundo_apellido", "nombres", "fecha_nacimiento", "fecha_expiracion", "genero"}):
+            merged_parsed[key] = value
+
+    mrz_doc = _clean_doc_number(mrz.get("cedula") or mrz_parsed.get("cedula"))
+    local_doc = _clean_doc_number(local.get("cedula") or local_parsed.get("cedula"))
+    cedula = mrz_doc or local_doc
+    if cedula:
+        merged_parsed["cedula"] = cedula
+
+    pipeline = local.get("pipeline_usado") or "ocr_local"
+    if "mrz" not in pipeline.lower():
+        pipeline = f"{pipeline}+mrz"
+
+    return {
+        **local,
+        "ok": True,
+        "cedula": cedula,
+        "texto_completo": local.get("texto_completo") or mrz.get("texto_completo") or "",
+        "pipeline_usado": pipeline,
+        "parsed": merged_parsed,
+        "raw_mrz": mrz.get("raw_mrz") or local.get("raw_mrz") or [],
+        "mrz_valido": bool(mrz.get("mrz_valido") or local.get("mrz_valido")),
+    }
+
+
+async def _ocr_cedula_with_mrz_async(img_bytes: bytes) -> dict:
+    local_result, mrz_result = await asyncio.gather(
+        ocr_cedula_async(img_bytes),
+        ocr_mrz_cedula_async(img_bytes),
+    )
+    return _merge_local_ocr_mrz(local_result, mrz_result)
+
+
+async def _analyze_gemini_async(img_bytes: bytes) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, analyze_cedula_with_gemini, img_bytes)
+
+
+async def ocr_from_base64_async(data_uri_or_b64: str, force_gemini: bool = False) -> dict:
     """
     Versión async-safe de ocr_from_base64.
     Úsala en endpoints FastAPI async para no bloquear el event loop.
@@ -744,31 +872,38 @@ async def ocr_from_base64_async(data_uri_or_b64: str) -> dict:
         img_bytes = base64.b64decode(s + "==", validate=False)
     except Exception as e:
         return {"ok": False, "error": f"Base64 inválido: {e}", "cedula": "", "texto_completo": ""}
-    local_result = await ocr_cedula_async(img_bytes)
-    if should_use_gemini and analyze_cedula_with_gemini and should_use_gemini(local_result):
-        loop = asyncio.get_event_loop()
-        gemini_result = await loop.run_in_executor(None, analyze_cedula_with_gemini, img_bytes)
-        if gemini_result.get("cedula"):
-            local_parsed = local_result.get("parsed") or {}
-            gemini_parsed = gemini_result.get("parsed") or {}
-            merged_parsed = dict(gemini_parsed)
-            for key, value in local_parsed.items():
-                if value:
-                    merged_parsed[key] = value
-            cedula = local_result.get("cedula") or gemini_result.get("cedula") or ""
+
+    gemini_available = bool(should_use_gemini and analyze_cedula_with_gemini and should_use_gemini({"cedula": ""}))
+    if force_gemini:
+        if gemini_available:
+            gemini_result = await _analyze_gemini_async(img_bytes)
+            if gemini_result.get("cedula"):
+                return gemini_result
+            local_result = await _ocr_cedula_with_mrz_async(img_bytes)
+            if local_result.get("cedula"):
+                return {
+                    **local_result,
+                    "gemini": gemini_result.get("gemini") or {},
+                    "gemini_error": gemini_result.get("error") or "",
+                }
             return {
                 **local_result,
-                "ok": True,
-                "cedula": cedula,
-                "texto_completo": local_result.get("texto_completo") or gemini_result.get("texto_completo") or "",
-                "pipeline_usado": (
-                    f"{local_result.get('pipeline_usado') or 'ocr_local'}+gemini"
-                    if local_result.get("cedula")
-                    else "gemini_vision"
-                ),
-                "parsed": merged_parsed,
                 "gemini": gemini_result.get("gemini") or {},
+                "error": gemini_result.get("error") or local_result.get("error", ""),
             }
+
+        return await _ocr_cedula_with_mrz_async(img_bytes)
+
+    local_result = await _ocr_cedula_with_mrz_async(img_bytes)
+    use_gemini = bool(
+        should_use_gemini
+        and analyze_cedula_with_gemini
+        and (force_gemini or should_use_gemini(local_result))
+    )
+    if use_gemini:
+        gemini_result = await _analyze_gemini_async(img_bytes)
+        if gemini_result.get("cedula"):
+            return _merge_ocr_gemini(local_result, gemini_result, prefer_gemini=False)
         if not local_result.get("cedula"):
             return {
                 **local_result,

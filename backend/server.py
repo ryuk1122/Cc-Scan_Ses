@@ -51,6 +51,13 @@ def parse_csv_env(name: str, default: str = "") -> List[str]:
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
 MONGO_URL   = require_env("MONGO_URL")
 DB_NAME     = require_env("DB_NAME")
 JWT_SECRET  = require_env("JWT_SECRET_KEY")
@@ -58,6 +65,7 @@ JWT_ALGO    = os.environ.get("JWT_ALGORITHM", "HS256")
 TOKEN_HOURS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_HOURS", "12"))
 CORS_ORIGINS = parse_csv_env("CORS_ORIGINS", "*")
 BCRYPT_ROUNDS = int(os.environ.get("BCRYPT_ROUNDS", "10"))
+ALLOW_WIPE_AFILIADOS = parse_bool_env("ALLOW_WIPE_AFILIADOS", False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cedulascan")
@@ -721,7 +729,14 @@ async def delete_afiliado(cedula: str, current=Depends(require_admin)):
 
 
 @api.delete("/admin/afiliados")
-async def wipe_afiliados(current=Depends(require_admin)):
+async def wipe_afiliados(confirm: str = Query("", max_length=64), current=Depends(require_admin)):
+    if not ALLOW_WIPE_AFILIADOS:
+        raise HTTPException(
+            status_code=403,
+            detail="Borrado masivo de afiliados deshabilitado. Activa ALLOW_WIPE_AFILIADOS=true solo para una ventana de mantenimiento.",
+        )
+    if confirm != "BORRAR_AFILIADOS":
+        raise HTTPException(status_code=400, detail="Confirmacion requerida para borrar todos los afiliados")
     res = await db.afiliados.delete_many({})
     return {"ok": True, "deleted": res.deleted_count}
 
@@ -763,7 +778,9 @@ async def obtener_evento(evento_id: str, current=Depends(get_current_user)):
 
 
 @api.delete("/eventos/{evento_id}")
-async def eliminar_evento(evento_id: str, current=Depends(require_admin)):
+async def eliminar_evento(evento_id: str, confirm: str = Query("", max_length=80), current=Depends(require_admin)):
+    if confirm != evento_id:
+        raise HTTPException(status_code=400, detail="Confirmacion requerida para eliminar el evento")
     await db.eventos.delete_one({"id": evento_id})
     r = await db.registros.delete_many({"evento_id": evento_id})
     await db.event_store.delete_many({"aggregate_id": evento_id})
@@ -771,7 +788,9 @@ async def eliminar_evento(evento_id: str, current=Depends(require_admin)):
 
 
 @api.delete("/eventos/{evento_id}/registros")
-async def limpiar_registros_evento(evento_id: str, current=Depends(require_admin)):
+async def limpiar_registros_evento(evento_id: str, confirm: str = Query("", max_length=80), current=Depends(require_admin)):
+    if confirm != evento_id:
+        raise HTTPException(status_code=400, detail="Confirmacion requerida para limpiar registros del evento")
     e = await db.eventos.find_one({"id": evento_id})
     if not e:
         raise HTTPException(status_code=404, detail="Evento no existe")
@@ -1119,11 +1138,13 @@ async def escanear(
 # ---------- OCR ----------
 class OcrRequest(BaseModel):
     image_base64: str = Field(min_length=10)
+    force_gemini: bool = False
+    prefer_mrz: bool = False
 
 
 @api.post("/ocr/cedula")
 async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
-    result   = await ocr_from_base64_async(body.image_base64)
+    result   = await ocr_from_base64_async(body.image_base64, force_gemini=body.force_gemini)
     parsed   = result.get("parsed") or {}
     afiliado = None
     if result.get("cedula"):
@@ -1146,7 +1167,7 @@ async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
 @api.post("/barcode/cedula")
 async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)):
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, decode_identity_document_from_base64, body.image_base64)
+    result = await loop.run_in_executor(None, decode_identity_document_from_base64, body.image_base64, body.prefer_mrz)
     afiliado = None
     if result.get("cedula"):
         afiliado = await db.afiliados.find_one({"cedula": result["cedula"]}, {"_id": 0})
@@ -1233,10 +1254,27 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
             
         print("\n[BACKEND-📸] Procesando por respaldo de imagen...")
         resultado_img = decode_identity_document_from_base64(image_base64)
-        
+
         if not resultado_img.get("ok"):
-            return {"ok": False, "error": resultado_img.get("error", "No se detectó el código PDF417")}
-            
+            ocr_result = await ocr_from_base64_async(image_base64, force_gemini=False)
+            if ocr_result.get("cedula"):
+                resultado_img = {
+                    "ok": True,
+                    "cedula": ocr_result.get("cedula", ""),
+                    "raw": ocr_result.get("texto_completo", ""),
+                    "parsed": ocr_result.get("parsed", {}) or {},
+                    "source": "ocr_front",
+                    "format": "ocr",
+                    "raw_mrz": ocr_result.get("raw_mrz", []) or [],
+                    "mrz_valido": bool(ocr_result.get("mrz_valido")),
+                    "error": "",
+                }
+            else:
+                return {
+                    "ok": False,
+                    "error": resultado_img.get("error") or ocr_result.get("error") or "No se detectó el código PDF417",
+                }
+
         cedula = resultado_img.get("cedula")
         raw_text = resultado_img.get("raw", "")
         parsed = resultado_img.get("parsed", {})

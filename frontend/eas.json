@@ -9,12 +9,15 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scanses-production.up.railway.app"
+      }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scan-ses.onrender.com"
+        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scanses-production.up.railway.app"
       }
     }
   },
