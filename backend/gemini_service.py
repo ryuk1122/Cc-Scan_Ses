@@ -22,25 +22,20 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model
 DEFAULT_MODEL = "gemini-2.5-flash"
 
 PROMPT = """
-Eres un extractor estricto de cedulas de ciudadania colombianas.
-Analiza TODAS las imagenes recibidas (frente y/o reverso) y responde UNICAMENTE JSON valido, sin markdown.
+Eres un extractor visual experto en cedulas de ciudadania colombianas.
+Tu prioridad es leer el NUIP/cedula real, nombres, apellidos y fechas reales.
+Analiza una o dos imagenes: frente, reverso o ambos. Responde SOLO JSON valido, sin markdown.
+Version interna: cedula_colombia_v3_ia_primero_confianza_040.
 
-TIPOS DE DOCUMENTOS QUE DEBES RECONOCER:
-1. Cedula fisica antigua (fondo beige/crema, foto en blanco y negro o color, hologramas)
-2. Cedula fisica nueva 2000-2020 (fondo azul/verde con hologramas, MRZ en reverso)
-3. Cedula digital nueva 2024+ (fondo azul oscuro con elementos graficos modernos, chip visible,
-   codigo QR en reverso, el numero aparece como "NUIP" o bajo la foto con fuente grande)
-4. Cualquier documento colombiano con MRZ (IDCOL, ID<COL, ICCOL, IC<COL)
-
-Si la imagen NO es un documento de identidad colombiano, responde:
+Si la imagen no es una cedula/documento colombiano, responde exactamente:
 {"ok":false,"error":"no_es_documento_colombiano","confianza":0}
 
-Si ES un documento colombiano, responde con este esquema exacto:
+Si si es documento colombiano, responde exactamente este esquema:
 {
   "ok": true,
-  "cedula": "NUIP o numero de cedula sin puntos ni espacios ni guiones",
-  "nombres": "NOMBRES EN MAYUSCULA sin tildes",
-  "primer_apellido": "PRIMER APELLIDO EN MAYUSCULA",
+  "cedula": "solo digitos del NUIP real",
+  "nombres": "NOMBRES EN MAYUSCULA o null",
+  "primer_apellido": "PRIMER APELLIDO EN MAYUSCULA o null",
   "segundo_apellido": "SEGUNDO APELLIDO EN MAYUSCULA o null",
   "fecha_nacimiento": "YYYYMMDD o null",
   "fecha_expedicion": "YYYYMMDD o null",
@@ -52,20 +47,27 @@ Si ES un documento colombiano, responde con este esquema exacto:
   "confianza": 0.0
 }
 
-REGLAS CRITICAS:
-- No inventes datos. Si no se ve con claridad, usa null.
-- El NUIP/cedula tiene entre 5 y 11 digitos. Nunca incluyas puntos, espacios ni el digito verificador MRZ.
-- En cedulas digitales 2024: el numero NUIP aparece prominente debajo de la foto o en el frente superior.
-  Tambien puede aparecer como codigo de barras o QR — NO extraigas el numero del QR, usa el impreso.
-- En el REVERSO con MRZ de 3 lineas (ICCOL/IDCOL):
-    Linea 1: prefijo + numero documento + digito verificador + campos opcionales
-    Linea 2: fecha nacimiento (AAMMDD) + verificador + genero + fecha expiracion + verificador + nacionalidad + verificador
-    Linea 3: apellido1 + "<" + apellido2 + "<<" + nombres (separados por "<")
-  Extrae el numero de cedula del campo de documento SIN el digito verificador final.
-- Si hay conflicto entre MRZ y texto visible, prioriza el numero con etiqueta NUIP o el impreso en el frente.
-- En cedulas nuevas 2024 el campo "Fecha de expedicion" puede NO aparecer en el frente; busca en reverso.
-- Devuelve nombres y apellidos solo si se leen claramente. No adivines letras borrosas.
-- Usa solo texto plano, sin explicaciones ni comentarios fuera del JSON.
+Reglas obligatorias para cedula/NUIP:
+- El NUIP real tiene entre 5 y 11 digitos. No uses puntos, espacios ni guiones.
+- Nunca devuelvas fechas, seriales, consecutivos, QR, codigos internos, digitos de control ni numeros parciales.
+- En el frente, usa el numero que este junto a NUIP, C.C., Cedula, Numero, Documento o Identificacion.
+- Si hay frente y reverso, valida que el numero coincida. Si no coincide, prioriza el NUIP/Cedula impreso en el frente.
+
+Reglas MRZ/ICCOL para reverso:
+- Acepta MRZ de 3 lineas con IDCOL, ID<COL, ICCOL o IC<COL.
+- En cedulas nuevas con ICCOL, la primera linea puede traer un consecutivo interno. NO lo uses como cedula.
+- Si ves algo como "ICCOL000000012", NO devuelvas "12" ni "000000012".
+- En cedula colombiana moderna, el NUIP real suele estar en la segunda linea despues de "COL".
+- Ejemplo: "8808213F3101300COL1234567890<9" => cedula correcta "1234567890".
+- Quita caracteres "<" y no incluyas el ultimo digito verificador MRZ.
+- La tercera linea MRZ trae apellidos y nombres: apellidos antes de "<<", nombres despues de "<<".
+
+Reglas de calidad y costo:
+- Revisa visualmente el numero dos veces antes de responder.
+- Si lees el numero pero no lees nombres o fechas, conserva la cedula y deja esos campos en null.
+- Si el numero no es legible, responde {"ok":false,"error":"cedula_no_legible","confianza":0.39}.
+- Confianza 0.40-0.60 significa lectura util pero no perfecta; 0.70+ solo si el numero esta claro.
+- No inventes datos. No expliques. No agregues campos fuera del esquema.
 """
 
 
@@ -106,7 +108,7 @@ def _normalize_date(value: Any) -> str:
 
 def _clean_text(value: Any) -> str:
     text = str(value or "").upper()
-    text = re.sub(r"[^A-ZÁÉÍÓÚÜÑ\s.'-]", " ", text)
+    text = re.sub(r"[^A-Z\u00C1\u00C9\u00CD\u00D3\u00DA\u00DC\u00D1\s.'-]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -168,60 +170,15 @@ def _parsed_from_gemini(payload: Dict[str, Any]) -> Dict[str, str]:
         "segundo_apellido": _clean_text(_first_non_empty(payload, "segundo_apellido", "segundoApellido", "apellido2", "surname2", "last_name_2")),
         "genero": _clean_text(_first_non_empty(payload, "genero", "sexo", "sex"))[:1],
         "fecha_nacimiento": _normalize_date(_first_non_empty(payload, "fecha_nacimiento", "fechaNacimiento", "birth_date", "birthDate")),
+        "fecha_expedicion": _normalize_date(_first_non_empty(payload, "fecha_expedicion", "fechaExpedicion", "issue_date", "issueDate")),
         "fecha_expiracion": _normalize_date(_first_non_empty(payload, "fecha_expiracion", "fechaExpiracion", "fecha_vencimiento", "expiry_date", "expiryDate")),
         "tipo_sangre": _clean_blood(_first_non_empty(payload, "tipo_sangre", "rh", "blood_type", "bloodType")),
+        "lugar_nacimiento": _clean_text(_first_non_empty(payload, "lugar_nacimiento", "lugarNacimiento", "birth_place", "birthPlace")),
+        "lugar_expedicion": _clean_text(_first_non_empty(payload, "lugar_expedicion", "lugarExpedicion", "issue_place", "issuePlace")),
         "formato_detectado": "gemini_vision",
     }
 
 
-PROMPT = """
-Eres un extractor estricto de cedulas de ciudadania colombianas.
-Analiza la imagen completa, sea frente o reverso, y responde UNICAMENTE JSON valido.
-No uses markdown, no expliques nada fuera del JSON.
-Version interna del criterio: cedula_colombia_v2_confianza_040.
-
-Si la imagen no parece una cedula colombiana o documento colombiano, responde:
-{"ok":false,"error":"no_es_documento_colombiano","confianza":0}
-
-Si es documento colombiano, responde exactamente con este esquema:
-{
-  "ok": true,
-  "cedula": "NUIP o numero de cedula sin puntos, espacios ni guiones",
-  "nombres": "NOMBRES EN MAYUSCULA o null",
-  "primer_apellido": "PRIMER APELLIDO EN MAYUSCULA o null",
-  "segundo_apellido": "SEGUNDO APELLIDO EN MAYUSCULA o null",
-  "fecha_nacimiento": "YYYYMMDD o null",
-  "fecha_expedicion": "YYYYMMDD o null",
-  "fecha_expiracion": "YYYYMMDD o null",
-  "genero": "M o F o null",
-  "tipo_sangre": "O+ / O- / A+ / A- / B+ / B- / AB+ / AB- o null",
-  "lugar_nacimiento": "CIUDAD o null",
-  "lugar_expedicion": "CIUDAD o null",
-  "confianza": 0.0
-}
-
-Reglas para el numero de cedula / NUIP:
-- Debe tener entre 5 y 11 digitos.
-- Nunca devuelvas fechas como cedula.
-- Nunca devuelvas numeros de tramite, seriales, consecutivos, codigos QR, digitos de control ni numeros parciales.
-- En el frente, prioriza el numero junto a etiquetas NUIP, C.C., Cedula, Numero, Documento o Identificacion.
-- Si el frente y el reverso muestran numeros distintos, usa el numero etiquetado como NUIP/Cedula o el numero completo del campo opcional MRZ colombiano.
-
-Reglas MRZ para reverso:
-- Acepta MRZ de 3 lineas con prefijos IDCOL, ID<COL, ICCOL o IC<COL.
-- En cedulas nuevas con ICCOL, NO uses el consecutivo corto de la primera linea.
-- Ejemplo: si ves "ICCOL000000012", NO devuelvas 12.
-- En cedula colombiana moderna, el NUIP real puede estar en la segunda linea despues de "COL".
-- Ejemplo de segunda linea: "8808213F3101300COL1234567890<9". En ese caso la cedula correcta es "1234567890".
-- Quita rellenos "<" y no incluyas el digito verificador MRZ final.
-- La tercera linea MRZ contiene apellidos y nombres. Usa el texto antes de "<<" para apellidos y despues de "<<" para nombres.
-
-Reglas de calidad:
-- Si el numero no se ve claro, responde ok=false con error "cedula_no_legible".
-- Si lees el numero pero no lees nombres o fechas, deja esos campos en null y conserva la cedula.
-- Devuelve confianza entre 0 y 1: usa 0.40-0.60 para lectura aceptable pero no perfecta, 0.70+ solo si el numero esta claro.
-- No inventes letras, fechas ni nombres.
-"""
 
 
 def analyze_cedula_with_gemini(
@@ -234,7 +191,7 @@ def analyze_cedula_with_gemini(
 
     inline_data, mime_type = _prepare_image(image_bytes)
 
-    # Frente siempre presente; reverso opcional — ambos en una sola llamada
+    # Frente siempre presente; reverso opcional, ambos en una sola llamada.
     parts: list[Dict[str, Any]] = [
         {"text": PROMPT},
         {"inline_data": {"mime_type": mime_type, "data": inline_data}},
