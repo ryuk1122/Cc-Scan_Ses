@@ -21,7 +21,11 @@
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN"
       ],
       "package": "com.anonymous.frontend"
     },
@@ -48,7 +52,8 @@
           "recordAudioAndroid": false
         }
       ],
-      "expo-font"
+      "expo-font",
+      "react-native-bluetooth-escpos-printer"
     ],
     "experiments": {
       "typedRoutes": true
