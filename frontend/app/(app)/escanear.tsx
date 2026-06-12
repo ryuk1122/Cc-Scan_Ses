@@ -24,7 +24,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "@/src/theme";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
-import { parsePdf417 } from "@/src/utils/cedula";
+import { extractCedula, parsePdf417 } from "@/src/utils/cedula";
 import { imprimirTicket, conectarImpresoraGuardada } from "@/src/utils/printer";
 import PrinterSelector from "@/src/components/PrinterSelector";
 
@@ -39,6 +39,7 @@ type ScanResult = {
   municipio?: string;
   cedula?: string;
   registro?: {
+    cedula?: string;
     nombre?: string;
     cargo?: string;
     municipio?: string;
@@ -115,9 +116,10 @@ export default function EscanearScreen() {
       try {
         // Parsear PDF417 / MRZ localmente para extraer datos enriquecidos
         const parsed = parsePdf417(data);
-        const cedula = parsed.cedula || data.replace(/\D/g, "").replace(/^0+/, "");
+        const parsedCedula = /^\d{5,11}$/.test(parsed.cedula || "") ? parsed.cedula : "";
+        const cedula = parsedCedula || extractCedula(data) || "";
 
-        if (!cedula || cedula.length < 5) {
+        if (!/^\d{5,11}$/.test(cedula)) {
           setLastResult({ ok: false, mensaje: "Código no reconocido como cédula" });
           return;
         }
@@ -160,6 +162,7 @@ export default function EscanearScreen() {
           } as any),
         } as any);
 
+        const finalCedula = result.registro?.cedula || cedula;
         const printNombre = result.registro?.nombre || nombre;
         const printCargo = result.registro?.cargo || cargo;
         const printMunicipio = result.registro?.municipio || municipio;
@@ -169,7 +172,7 @@ export default function EscanearScreen() {
           nombre: printNombre,
           cargo: printCargo,
           municipio: printMunicipio,
-          cedula,
+          cedula: finalCedula,
         });
 
         if (result.ok) {
@@ -192,9 +195,9 @@ export default function EscanearScreen() {
   // ── escaneo manual ─────────────────────────────────────────────────────────
 
   const handleManual = useCallback(async () => {
-    const cedula = cedulaManual.trim().replace(/\D/g, "");
-    if (!cedula || cedula.length < 5) {
-      Alert.alert("Cédula inválida", "Ingresa mínimo 5 dígitos.");
+    const cedula = cedulaManual.trim().replace(/\D/g, "").replace(/^0+/, "");
+    if (!/^\d{5,11}$/.test(cedula)) {
+      Alert.alert("Cédula inválida", "Ingresa entre 5 y 11 dígitos.");
       return;
     }
     setShowManual(false);

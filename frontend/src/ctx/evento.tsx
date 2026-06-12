@@ -100,6 +100,11 @@ function scanErrorMessage(err: any, fallback: string): string {
   return fallback;
 }
 
+function normalizeCedulaForScan(value: string): string {
+  const digits = String(value || "").replace(/\D/g, "").replace(/^0+/, "");
+  return /^\d{5,11}$/.test(digits) ? digits : "";
+}
+
 export function EventoProvider({ children }: { children: ReactNode }) {
   const { token } = useSession();
   const [eventoId, setEventoId] = useState<string | null>(null);
@@ -361,7 +366,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const scan = useCallback(
     async (cedulaRaw: string, extras: Partial<Registro> & { raw_barcode?: string } = {}) => {
       if (!eventoId) return { ok: false, mensaje: "Selecciona un evento primero" };
-      const cedula = cedulaRaw.replace(/\D/g, "");
+      const cedula = normalizeCedulaForScan(cedulaRaw);
       if (!cedula) return { ok: false, mensaje: "Cédula inválida" };
 
       // Nivel 1: cliente local
@@ -399,8 +404,9 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       try {
         const res = await api.escanear(payload, idempotency_key);
         if (res?.ok && res.registro) {
+          const registeredCedula = res.registro.cedula || cedula;
           addRegistro(res.registro);
-          setLastSuccess({ cedula, ts: Date.now() });
+          setLastSuccess({ cedula: registeredCedula, ts: Date.now() });
           return { ok: true, mensaje: "Registrado correctamente", registro: res.registro };
         }
         return { ok: false, mensaje: res?.mensaje || "Error" };
@@ -408,14 +414,15 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         if (err?.status === 409) {
           // Duplicado servidor
           const existing = err?.detail?.registro_existente;
+          const duplicateCedula = existing?.cedula || cedula;
           if (existing) {
             addRegistro(existing as Registro);
           } else {
-            cedulasSetRef.current.add(cedula);
+            cedulasSetRef.current.add(duplicateCedula);
           }
-          setLastDuplicate({ cedula, ts: Date.now() });
+          setLastDuplicate({ cedula: duplicateCedula, ts: Date.now() });
           setDuplicadosBloqueados((n) => n + 1);
-          return { ok: false, duplicate: true, mensaje: `Atención: ya registrado: ${cedula}` };
+          return { ok: false, duplicate: true, mensaje: `Atención: ya registrado: ${duplicateCedula}` };
         }
         if (!shouldQueueAfterError(err)) {
           return { ok: false, mensaje: scanErrorMessage(err, "No se pudo registrar") };

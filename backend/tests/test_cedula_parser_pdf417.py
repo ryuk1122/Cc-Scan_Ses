@@ -1,4 +1,4 @@
-from cedula_parser import extract_cedula, mrz_check_digit, parse_mrz_from_text, parse_pdf417, parse_pdf417_bytes
+from cedula_parser import clean_cedula, extract_cedula, mrz_check_digit, parse_mrz_from_text, parse_pdf417, parse_pdf417_bytes
 
 
 def _put(data: bytearray, start: int, end: int, value: str) -> None:
@@ -116,6 +116,13 @@ def test_parse_new_colombian_iccol_mrz_from_photo_example_prefers_line2_nuip():
     assert parsed["nombres"] == "LAURA"
     assert parsed["fecha_nacimiento"] == "1988-08-21"
     assert parsed["fecha_expiracion"] == "2031-01-30"
+
+
+def test_clean_cedula_rejects_long_digit_concatenation():
+    raw = "ICCOL000000012<<<<<<<<<<<<<<<\n8808213F3101300COL1234567890<9"
+
+    assert clean_cedula(raw) == "1234567890"
+    assert clean_cedula("ICCOL0000000128808213310130012345678909") is None
 
 
 def test_parse_new_colombian_iccol_mrz_cleans_ocr_filler_before_given_name():

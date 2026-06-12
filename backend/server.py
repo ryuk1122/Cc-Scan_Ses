@@ -250,6 +250,29 @@ def clean_display_text(value: Any) -> str:
     return " ".join(text.split()).strip()
 
 
+TRUSTED_BARCODE_FORMATS = {
+    "pdf417_binario_posicional",
+    "pdf417_binario_compacto",
+    "mrz_td1",
+    "cedula_amarilla_guiones",
+    "clasico_guiones",
+    "pipe_separado",
+    "numero_puro",
+}
+
+
+def trusted_barcode_cedula(parsed: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(parsed, dict):
+        return None
+    cedula = clean_cedula(parsed.get("cedula"))
+    if not cedula:
+        return None
+    formato = str(parsed.get("formato_detectado") or "")
+    if parsed.get("mrz_valido") or parsed.get("raw_mrz") or formato in TRUSTED_BARCODE_FORMATS:
+        return cedula
+    return None
+
+
 # ---------- WebSocket manager ----------
 class ConnectionManager:
     def __init__(self) -> None:
@@ -977,9 +1000,19 @@ async def escanear(
     current=Depends(get_current_user),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
-    cedula_norm = clean_cedula(body.cedula)
+    parsed = parse_pdf417(body.raw_barcode) if body.raw_barcode else {}
+    client_cedula = clean_cedula(body.cedula)
+    barcode_cedula = trusted_barcode_cedula(parsed)
+    cedula_norm = barcode_cedula or client_cedula
     if not cedula_norm:
         raise HTTPException(status_code=400, detail="Cédula inválida")
+    if barcode_cedula and client_cedula and barcode_cedula != client_cedula:
+        logger.info(
+            "Cedula corregida desde raw_barcode: cliente=%s servidor=%s formato=%s",
+            client_cedula,
+            barcode_cedula,
+            parsed.get("formato_detectado"),
+        )
 
     evento = await db.eventos.find_one({"id": body.evento_id})
     if not evento:
@@ -1032,7 +1065,6 @@ async def escanear(
 
     afiliado   = await db.afiliados.find_one({"cedula": cedula_norm}, {"_id": 0})
     es_afiliado = bool(afiliado)
-    parsed     = parse_pdf417(body.raw_barcode) if body.raw_barcode else {}
 
     def pref(client_val: str, afi_key: str, parsed_key: str = "") -> str:
         if client_val:
@@ -1238,7 +1270,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
             
         try:
             parsed = parse_pdf417(raw_text)
-            cedula = parsed.get("cedula") or extract_cedula(raw_text) or ""
+            cedula = trusted_barcode_cedula(parsed) or parsed.get("cedula") or extract_cedula(raw_text) or ""
         except Exception as pe:
             print(f"[BACKEND-❌] Error parseando texto de barras: {pe}")
             cedula = ""
@@ -1282,7 +1314,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
     # ------------------------------------------------------------------
     # LÓGICA DE NEGOCIO: VALIDACIÓN, DEDUPLICACIÓN Y GUARDADO EN MONGO
     # ------------------------------------------------------------------
-    cedula_limpia = clean_cedula(cedula)
+    cedula_limpia = trusted_barcode_cedula(parsed) or clean_cedula(cedula)
     if not cedula_limpia:
         return {"ok": False, "error": "Código decodificado pero el número de cédula no es válido para Colombia"}
 

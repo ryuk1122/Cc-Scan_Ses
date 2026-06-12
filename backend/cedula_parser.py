@@ -933,6 +933,6 @@ def clean_cedula(value: Any) -> Optional[str]:
     digits_only = "".join(c for c in s if c.isdigit())
     if digits_only:
         stripped = digits_only.lstrip("0")
-        if len(stripped) >= _MIN_DIGITS:
+        if _MIN_DIGITS <= len(stripped) <= _MAX_DIGITS:
             return stripped
     return None
