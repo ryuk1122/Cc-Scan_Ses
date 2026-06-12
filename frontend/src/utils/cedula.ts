@@ -7,12 +7,7 @@ const DASH_GENDER_RE = /-([MF])-(\d{5,11})-/;
 const COLOMBIAN_DASH_PAYLOAD_RE = /(?:^|[^A-Z0-9])([A-Z])-\d{5,8}-\d{5,10}-([MF])-(\d{5,11})-((?:19|20)\d{6})(?:[^0-9]|$)/;
 const PIPE_FORMAT_RE = /^(\d{5,11})\|/;
 const KEY_VALUE_ID_RE = /(?:NUIP|DOCUMENTO|DOCUMENT_NUMBER|CEDULA|C[EÉ]DULA|IDENTIFICACION|IDENTIFICACI[OÓ]N)["']?\s*[:=]\s*["']?([0-9][0-9\s.,]{4,18}[0-9])/i;
-const NUMBER_LABEL_RE = /(?:N[U\u00DA]MERO\s+DE\s+C[E\u00C9]DULA|C[E\u00C9]DULA\s+DE\s+CIUDADAN[I\u00CD]A|IDENTIFICACI[O\u00D3]N|C\.?\s*C\.?|N[U\u00DA]MERO|N[\u00B0\u00BA]|NRO\.?|NO\.?|C[E\u00C9]DULA)[:\s#]*([0-9][0-9\s.,]{4,18}[0-9])/i;
-const MRZ_FIRST_LINE_RE = /^(\d{5,11})[\r\n]/;
-const STANDALONE_NUMBER_RE = /(?:^|\n)\s*(\d{7,10})\s*(?:\n|$)/g;
-const GROUPED_NUMBER_RE = /\d{1,3}(?:[.,]\d{3}){1,3}/g;
 const DATE_YYYYMMDD_RE = /^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/;
-const DATE_DDMMYYYY_RE = /^(0[1-9]|[12]\d|3[01])(0[1-9]|1[0-2])(19|20)\d{2}$/;
 const DATE_YYMMDD_RE = /^\d{6}$/;
 const YEAR_ONLY_RE = /^(19|20)\d{2}$/;
 const GENERO_RE = /(?:^|[^A-Za-z0-9])([MF])(?=[^A-Za-z0-9]|$)/;
@@ -90,25 +85,7 @@ export type ParsedCedula = {
 };
 
 function isDateLike(s: string): boolean {
-  return DATE_YYYYMMDD_RE.test(s) || DATE_DDMMYYYY_RE.test(s) || YEAR_ONLY_RE.test(s);
-}
-
-function normalizeNum(s: string): string {
-  return String(s || "").replace(/[.,\s]/g, "");
-}
-
-function isValidCedulaCandidate(value: string): boolean {
-  const normalized = normalizeNum(value);
-  if (!/^\d{5,11}$/.test(normalized)) return false;
-  const stripped = normalized.replace(/^0+/, "");
-  if (stripped.length < 4) return false;
-  return !isDateLike(normalized) && !isDateLike(stripped);
-}
-
-function normalizeCedulaCandidate(value: string): string | null {
-  const normalized = normalizeNum(value);
-  if (!isValidCedulaCandidate(normalized)) return null;
-  return normalized.replace(/^0+/, "") || normalized;
+  return DATE_YYYYMMDD_RE.test(s) || YEAR_ONLY_RE.test(s);
 }
 
 function cleanLeadingZeros(s: string): string | null {
@@ -229,7 +206,7 @@ function parseClassicPdf417(raw: string | null | undefined): ParsedCedula {
   const birthYear = decodePdf417Field(fieldBytes(bytes, "birth_year"));
   const birthMonth = decodePdf417Field(fieldBytes(bytes, "birth_month"));
   const birthDay = decodePdf417Field(fieldBytes(bytes, "birth_day"));
-  if (!isValidCedulaCandidate(documentNumber) || (gender && !["M", "F"].includes(gender))) return out;
+  if (!cleanLeadingZeros(documentNumber) || isDateLike(documentNumber) || (gender && !["M", "F"].includes(gender))) return out;
   if (!validPdf417Date(birthYear, birthMonth, birthDay) && !hasMarker) return out;
 
   const firstName = decodePdf417Field(fieldBytes(bytes, "first_name"), true);
@@ -374,11 +351,10 @@ export function parseMrz(raw: string | null | undefined): ParsedCedula {
   const optionalNuip = fixMrzDigits(l2.slice(18, 29).replace(/</g, ""));
   const nameLine = l3.replace(/0/g, "O").replace(/<+$/g, "");
 
-  const docCedula = normalizeCedulaCandidate(docField.replace(/</g, ""));
-  const nuipCedula = normalizeCedulaCandidate(optionalNuip);
-  out.cedula = nuipCedula && (!docCedula || nuipCedula.length >= docCedula.length)
-    ? nuipCedula
-    : (docCedula || "");
+  const docCedula = docField.replace(/</g, "").replace(/^0+/, "");
+  out.cedula = optionalNuip.length > docCedula.length && /^\d{7,11}$/.test(optionalNuip)
+    ? optionalNuip.replace(/^0+/, "")
+    : docCedula;
   out.genero = ["M", "F"].includes(l2[7]) ? l2[7] : "";
   out.fecha_nacimiento = formatMrzDate(birth);
   out.fecha_expiracion = formatMrzDate(expiry, true);
@@ -400,7 +376,6 @@ export function parseMrz(raw: string | null | undefined): ParsedCedula {
   out.mrz_valido = validateMrzField(docField.replace(/^0+/, "") || docField, docCheck)
     && validateMrzField(birth, birthCheck)
     && validateMrzField(expiry, expiryCheck);
-  out.formato_detectado = "mrz_td1";
   return out;
 }
 
@@ -428,80 +403,48 @@ export function extractCedula(raw: string | null | undefined): string | null {
   if (classic.cedula) return classic.cedula;
 
   const mrz = parseMrz(s);
-  const mrzCedula = normalizeCedulaCandidate(mrz.cedula);
-  if (mrzCedula) return mrzCedula;
+  if (mrz.cedula) return cleanLeadingZeros(mrz.cedula) ? mrz.cedula : null;
 
-  const numeric = normalizeCedulaCandidate(s);
-  if (numeric && /^\d[\d\s.,]*$/.test(s)) {
-    return numeric;
-  }
-
-  const colombianDash = s.toUpperCase().match(COLOMBIAN_DASH_PAYLOAD_RE);
-  if (colombianDash) {
-    const cedula = normalizeCedulaCandidate(colombianDash[3]);
-    if (cedula) return cedula;
-  }
-
-  const dash = s.match(DASH_GENDER_RE);
-  if (dash) {
-    const cedula = normalizeCedulaCandidate(dash[2]);
-    if (cedula) return cedula;
-  }
-
-  const pipe = s.match(PIPE_FORMAT_RE);
-  if (pipe) {
-    const cedula = normalizeCedulaCandidate(pipe[1]);
-    if (cedula) return cedula;
-  }
-
-  const mrzFirstLine = s.match(MRZ_FIRST_LINE_RE);
-  if (mrzFirstLine) {
-    const cedula = normalizeCedulaCandidate(mrzFirstLine[1]);
-    if (cedula) return cedula;
+  if (/^\d{5,11}$/.test(s) && !isDateLike(s)) {
+    return cleanLeadingZeros(s) ? s : null;
   }
 
   const keyValueId = s.match(KEY_VALUE_ID_RE);
   if (keyValueId) {
-    const cedula = normalizeCedulaCandidate(keyValueId[1]);
-    if (cedula) return cedula;
+    const normalized = keyValueId[1].replace(/[.,\s]/g, "");
+    if (/^\d{5,11}$/.test(normalized) && !isDateLike(normalized)) {
+      return cleanLeadingZeros(normalized) ? normalized : null;
+    }
   }
 
-  const labelId = s.match(NUMBER_LABEL_RE);
-  if (labelId) {
-    const cedula = normalizeCedulaCandidate(labelId[1]);
-    if (cedula) return cedula;
+  const colombianDash = s.toUpperCase().match(COLOMBIAN_DASH_PAYLOAD_RE);
+  if (colombianDash && !isDateLike(colombianDash[3])) {
+    return cleanLeadingZeros(colombianDash[3]) ? colombianDash[3] : null;
   }
 
-  const grouped = s.match(GROUPED_NUMBER_RE) || [];
-  for (const group of grouped) {
-    const cedula = normalizeCedulaCandidate(group);
-    if (cedula) return cedula;
-  }
+  const pipe = s.match(PIPE_FORMAT_RE);
+  if (pipe && !isDateLike(pipe[1])) return cleanLeadingZeros(pipe[1]) ? pipe[1] : null;
 
-  const reStandalone = new RegExp(STANDALONE_NUMBER_RE.source, "g");
-  let sm: RegExpExecArray | null;
-  while ((sm = reStandalone.exec(s)) !== null) {
-    const cedula = normalizeCedulaCandidate(sm[1]);
-    if (cedula) return cedula;
-  }
+  const dash = s.match(DASH_GENDER_RE);
+  if (dash && !isDateLike(dash[2])) return cleanLeadingZeros(dash[2]) ? dash[2] : null;
 
   let m: RegExpExecArray | null;
   const reGender = new RegExp(AFTER_GENDER_RE.source, "g");
   while ((m = reGender.exec(s)) !== null) {
-    const cedula = normalizeCedulaCandidate(m[2]);
-    if (cedula) return cedula;
+    const cleaned = cleanLeadingZeros(m[2]);
+    if (cleaned && !isDateLike(cleaned)) return cleaned;
   }
 
   const candidates: { value: string; pos: number; score: number }[] = [];
   const reRun = new RegExp(DIGIT_RUN_RE.source, "g");
   let cm: RegExpExecArray | null;
   while ((cm = reRun.exec(s)) !== null) {
-    const cleaned = normalizeCedulaCandidate(cm[1]);
+    if (isDateLike(cm[1])) continue;
+    const cleaned = cleanLeadingZeros(cm[1]);
     if (!cleaned) continue;
     const lenScore = ({ 10: 10, 9: 9, 8: 8, 7: 7, 6: 5, 5: 4, 11: 3 } as Record<number, number>)[cleaned.length] || 1;
     const posFrac = cm.index / Math.max(s.length, 1);
-    const leadingZeros = cm[1].length - cm[1].replace(/^0+/, "").length;
-    candidates.push({ value: cleaned, pos: cm.index, score: lenScore + Math.max(posFrac, 1 - posFrac) * 1.5 - leadingZeros });
+    candidates.push({ value: cleaned, pos: cm.index, score: lenScore + Math.max(posFrac, 1 - posFrac) * 1.5 });
   }
   if (looksBinaryPayload(s)) return null;
   candidates.sort((a, b) => b.score - a.score);
@@ -517,15 +460,11 @@ export function parsePdf417(raw: string | null | undefined): ParsedCedula {
   if (classic.cedula) return classic;
 
   const mrz = parseMrz(s);
-  if (mrz.raw_mrz?.length) {
-    Object.assign(out, mrz);
-    const mrzCedula = normalizeCedulaCandidate(mrz.cedula);
-    out.cedula = mrzCedula || "";
-  }
+  if (mrz.cedula) Object.assign(out, mrz);
 
   const colombianDash = s.toUpperCase().match(COLOMBIAN_DASH_PAYLOAD_RE);
   if (!out.cedula && colombianDash) {
-    out.cedula = normalizeCedulaCandidate(colombianDash[3]) || "";
+    out.cedula = cleanLeadingZeros(colombianDash[3]) ? colombianDash[3] : "";
     out.genero = colombianDash[2];
     out.fecha_expiracion = `${colombianDash[4].slice(0, 4)}-${colombianDash[4].slice(4, 6)}-${colombianDash[4].slice(6, 8)}`;
   }
