@@ -1,17 +1,18 @@
 import React from "react";
 import { Tabs, Redirect } from "expo-router";
+import type { ColorValue } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 import { useSession } from "@/src/ctx/session";
 import { theme } from "@/src/theme";
 
-type TabIconProps = { color: string; size: number };
+type TabIconProps = { color: ColorValue; size: number };
 
-const ScannerIcon = ({ color, size }: TabIconProps) => <Ionicons name="scan" size={size} color={color} />;
-const DashboardIcon = ({ color, size }: TabIconProps) => <Ionicons name="stats-chart" size={size} color={color} />;
-const AuditoriaIcon = ({ color, size }: TabIconProps) => <Ionicons name="document-text" size={size} color={color} />;
-const AdminIcon = ({ color, size }: TabIconProps) => <Ionicons name="shield-checkmark" size={size} color={color} />;
-const PerfilIcon = ({ color, size }: TabIconProps) => <Ionicons name="person-circle" size={size} color={color} />;
+const ScannerIcon = ({ color, size }: TabIconProps) => <Ionicons name="scan" size={size} color={String(color)} />;
+const DashboardIcon = ({ color, size }: TabIconProps) => <Ionicons name="stats-chart" size={size} color={String(color)} />;
+const AuditoriaIcon = ({ color, size }: TabIconProps) => <Ionicons name="document-text" size={size} color={String(color)} />;
+const AdminIcon = ({ color, size }: TabIconProps) => <Ionicons name="shield-checkmark" size={size} color={String(color)} />;
+const PerfilIcon = ({ color, size }: TabIconProps) => <Ionicons name="person-circle" size={size} color={String(color)} />;
 
 export default function AppLayout() {
   const { user, isLoading } = useSession();

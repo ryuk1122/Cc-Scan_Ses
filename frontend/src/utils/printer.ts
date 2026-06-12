@@ -1,165 +1,254 @@
-/**
- * printer.ts — Utilidades para impresora Bluetooth ESC/POS.
- * Usa react-native-bluetooth-escpos-printer.
- *
- * Flujo:
- *   1. listarImpresoras()  → escanea dispositivos BT pareados
- *   2. guardarImpresora()  → conecta y guarda MAC + nombre en AsyncStorage
- *   3. imprimirTicket()    → reconecta si es necesario e imprime
- */
+import { PermissionsAndroid, Platform } from "react-native";
+import type { Permission } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
-  BluetoothManager,
   BluetoothEscposPrinter,
-} from 'react-native-bluetooth-escpos-printer';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+  BluetoothManager,
+  BluetoothTscPrinter,
+} from "react-native-bluetooth-escpos-printer";
 
 export type Impresora = { name: string; address: string };
 
-const PRINTER_MAC_KEY  = 'printer_mac';
-const PRINTER_NAME_KEY = 'printer_name';
+export type EscarapelaPrintData = {
+  nombre: string;
+  cargo?: string;
+  municipio?: string;
+};
 
-// ─── helpers internos ──────────────────────────────────────────────────────
+const PRINTER_MAC_KEY = "printer_mac";
+const PRINTER_NAME_KEY = "printer_name";
 
-/** Verifica si el BT está habilitado y lo activa si no lo está */
-async function asegurarBluetooth(): Promise<void> {
-  try {
-    await BluetoothManager.enableBluetooth();
-  } catch {
-    // En algunos dispositivos falla silenciosamente si ya está activo
+const LABEL_WIDTH_MM = 80;
+const LABEL_HEIGHT_MM = 50;
+const LABEL_GAP_MM = 3;
+
+function cleanText(value?: string): string {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s.,#/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function toTitle(value?: string): string {
+  return cleanText(value)
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function wrap(value: string, maxChars: number, maxLines: number): string[] {
+  const words = cleanText(value).split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = word.length > maxChars ? word.slice(0, maxChars) : word;
+    if (lines.length >= maxLines) break;
+  }
+
+  if (current && lines.length < maxLines) lines.push(current);
+  return lines.length ? lines : ["SIN NOMBRE"];
+}
+
+async function requestBluetoothPermissions(): Promise<void> {
+  if (Platform.OS !== "android") return;
+
+  const apiLevel = Number(Platform.Version || 0);
+  const permissions: Permission[] =
+    apiLevel >= 31
+      ? [
+          "android.permission.BLUETOOTH_SCAN" as Permission,
+          "android.permission.BLUETOOTH_CONNECT" as Permission,
+        ]
+      : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+
+  const result = await PermissionsAndroid.requestMultiple(permissions);
+  const denied = permissions.some((permission) => result[permission] !== PermissionsAndroid.RESULTS.GRANTED);
+  if (denied) {
+    throw new Error("Activa los permisos de Bluetooth para conectar la impresora.");
   }
 }
 
-/** Intenta conectar a una MAC dada; lanza error si falla */
-async function conectarA(mac: string): Promise<void> {
-  await BluetoothManager.connect(mac);
+async function ensureBluetooth(): Promise<void> {
+  await requestBluetoothPermissions();
+  try {
+    await BluetoothManager.enableBluetooth();
+  } catch {
+    // Algunos dispositivos ya tienen Bluetooth activo y la libreria responde con error.
+  }
 }
 
-// ─── API pública ───────────────────────────────────────────────────────────
+async function connectTo(address: string): Promise<void> {
+  await BluetoothManager.connect(address);
+}
 
-/**
- * Devuelve la lista de impresoras Bluetooth ya pareadas en el teléfono.
- * También incluye dispositivos encontrados en el último scan si los hay.
- */
+function parsePrinterList(rawValue: unknown): Impresora[] {
+  if (!rawValue) return [];
+  if (Array.isArray(rawValue)) return rawValue as Impresora[];
+  try {
+    const parsed = JSON.parse(String(rawValue));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function listarImpresoras(): Promise<Impresora[]> {
-  await asegurarBluetooth();
+  await ensureBluetooth();
 
   let raw: any;
   try {
     raw = await BluetoothManager.scanDevices();
-  } catch (e: any) {
-    throw new Error(`No se pudo escanear dispositivos Bluetooth: ${e?.message ?? e}`);
+  } catch (error: any) {
+    throw new Error(`No se pudo buscar impresoras Bluetooth: ${error?.message ?? error}`);
   }
 
-  // scanDevices devuelve { paired?: string, found?: string }
-  const paired: Impresora[] = JSON.parse(raw?.paired || '[]');
-  const found: Impresora[]  = JSON.parse(raw?.found  || '[]');
+  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw || {};
+  const paired = parsePrinterList(parsed.paired);
+  const found = parsePrinterList(parsed.found);
+  const devices = new Map<string, Impresora>();
 
-  // Combinar sin duplicados por dirección MAC
-  const map = new Map<string, Impresora>();
-  [...paired, ...found].forEach((d) => {
-    if (d?.address) map.set(d.address, d);
+  [...paired, ...found].forEach((device) => {
+    if (device?.address) {
+      devices.set(device.address, {
+        address: device.address,
+        name: device.name || "Impresora Bluetooth",
+      });
+    }
   });
 
-  return Array.from(map.values());
+  return Array.from(devices.values());
 }
 
-/**
- * Conecta a la impresora indicada y persiste su MAC + nombre.
- * Lanza error si la conexión falla.
- */
 export async function guardarImpresora(address: string, name: string): Promise<void> {
-  await asegurarBluetooth();
-  await conectarA(address);                           // lanza si no puede conectar
+  await ensureBluetooth();
+  await connectTo(address);
   await AsyncStorage.setItem(PRINTER_MAC_KEY, address);
-  await AsyncStorage.setItem(PRINTER_NAME_KEY, name);
+  await AsyncStorage.setItem(PRINTER_NAME_KEY, name || "Impresora Bluetooth");
 }
 
-/**
- * Intenta conectar a la impresora previamente guardada.
- * @returns true si logró conectar, false si no hay impresora guardada o falla.
- */
 export async function conectarImpresoraGuardada(): Promise<boolean> {
   try {
-    const mac = await AsyncStorage.getItem(PRINTER_MAC_KEY);
-    if (!mac) return false;
-    await asegurarBluetooth();
-    await conectarA(mac);
+    const address = await AsyncStorage.getItem(PRINTER_MAC_KEY);
+    if (!address) return false;
+    await ensureBluetooth();
+    await connectTo(address);
     return true;
   } catch {
     return false;
   }
 }
 
-// ─── formato del ticket ────────────────────────────────────────────────────
+async function imprimirEscarapelaTsc({ nombre, cargo, municipio }: EscarapelaPrintData): Promise<void> {
+  const R = BluetoothTscPrinter.ROTATION.ROTATION_0;
+  const M = BluetoothTscPrinter.FONTMUL;
+  const F = BluetoothTscPrinter.FONTTYPE;
 
-const SEPARATOR = '================================';
-const SEPARATOR_THIN = '--------------------------------';
+  const nameLines = wrap(nombre, 22, 2);
+  const cargoText = cleanText(cargo) || "SIN CARGO";
+  const municipioText = cleanText(municipio) || "SIN MUNICIPIO";
 
-/**
- * Imprime un ticket de asistencia en la impresora Bluetooth conectada.
- * Requiere que la conexión ya esté establecida (conectarImpresoraGuardada).
- */
-export async function imprimirTicket(params: {
-  nombre: string;
-  cargo: string;
-  municipio: string;
-}): Promise<void> {
-  const { nombre, cargo, municipio } = params;
-
-  const C = BluetoothEscposPrinter.ALIGN.CENTER;
-  const L = BluetoothEscposPrinter.ALIGN.LEFT;
-
-  // ── Cabecera ──
-  await BluetoothEscposPrinter.printerAlign(C);
-  await BluetoothEscposPrinter.printText('SES\n', {
-    widthtimes: 2,
-    heighttimes: 2,
-    fonttype: 1,
+  await BluetoothTscPrinter.printLable({
+    width: LABEL_WIDTH_MM,
+    height: LABEL_HEIGHT_MM,
+    gap: LABEL_GAP_MM,
+    direction: BluetoothTscPrinter.DIRECTION.FORWARD,
+    reference: [0, 0],
+    tear: BluetoothTscPrinter.TEAR.ON,
+    sound: 0,
+    density: BluetoothTscPrinter.DENSITY.DNESITY10,
+    speed: BluetoothTscPrinter.PRINT_SPEED.SPEED3,
+    text: [
+      {
+        text: "SES",
+        x: 32,
+        y: 18,
+        fonttype: F.FONT_2,
+        rotation: R,
+        xscal: M.MUL_2,
+        yscal: M.MUL_2,
+      },
+      {
+        text: "ASISTENTE",
+        x: 500,
+        y: 22,
+        fonttype: F.FONT_1,
+        rotation: R,
+        xscal: M.MUL_1,
+        yscal: M.MUL_1,
+      },
+      ...nameLines.map((line, index) => ({
+        text: line,
+        x: 32,
+        y: 95 + index * 55,
+        fonttype: F.FONT_3,
+        rotation: R,
+        xscal: M.MUL_2,
+        yscal: M.MUL_2,
+      })),
+      {
+        text: `CARGO: ${cargoText}`,
+        x: 32,
+        y: 240,
+        fonttype: F.FONT_2,
+        rotation: R,
+        xscal: M.MUL_1,
+        yscal: M.MUL_1,
+      },
+      {
+        text: `MUNICIPIO: ${municipioText}`,
+        x: 32,
+        y: 305,
+        fonttype: F.FONT_2,
+        rotation: R,
+        xscal: M.MUL_1,
+        yscal: M.MUL_1,
+      },
+    ],
   });
-  await BluetoothEscposPrinter.printText(
-    'Sindicato de Educadores\nde Santander\n',
-    { fonttype: 1 }
-  );
-  await BluetoothEscposPrinter.printText(`${SEPARATOR}\n`, {});
+}
 
-  // ── Datos del asistente ──
-  await BluetoothEscposPrinter.printerAlign(L);
+async function imprimirEscarapelaEscpos({ nombre, cargo, municipio }: EscarapelaPrintData): Promise<void> {
+  const center = BluetoothEscposPrinter.ALIGN.CENTER;
+  const left = BluetoothEscposPrinter.ALIGN.LEFT;
+  const nameLines = wrap(nombre, 24, 2).map(toTitle);
 
-  await BluetoothEscposPrinter.printText(
-    nombre ? `Nombre:\n${nombre}\n` : 'Nombre: ---\n',
-    { fonttype: 1 }
-  );
-
-  await BluetoothEscposPrinter.printText(
-    cargo ? `Cargo:\n${cargo}\n` : 'Cargo: ---\n',
-    {}
-  );
-
-  await BluetoothEscposPrinter.printText(
-    municipio ? `Municipio:\n${municipio}\n` : 'Municipio: ---\n',
-    {}
-  );
-
-  // ── Pie ──
-  await BluetoothEscposPrinter.printerAlign(C);
-  await BluetoothEscposPrinter.printText(`${SEPARATOR_THIN}\n`, {});
-
-  const now = new Date().toLocaleString('es-CO', {
-    timeZone: 'America/Bogota',
-    day:    '2-digit',
-    month:  '2-digit',
-    year:   'numeric',
-    hour:   '2-digit',
-    minute: '2-digit',
-  });
-  await BluetoothEscposPrinter.printText(`${now}\n`, {});
-  await BluetoothEscposPrinter.printText('** BIENVENIDO **\n', { widthtimes: 1, heighttimes: 1, fonttype: 1 });
-
-  // Avance de papel y corte
-  await BluetoothEscposPrinter.printText('\n\n\n', {});
+  await BluetoothEscposPrinter.printerAlign(center);
+  await BluetoothEscposPrinter.printText("SES\n", { widthtimes: 2, heighttimes: 2, fonttype: 1 });
+  await BluetoothEscposPrinter.printText("ESCARAPELA\n", { fonttype: 1 });
+  await BluetoothEscposPrinter.printText("--------------------------------\n", {});
+  for (const line of nameLines) {
+    await BluetoothEscposPrinter.printText(`${line}\n`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
+  }
+  await BluetoothEscposPrinter.printText("\n", {});
+  await BluetoothEscposPrinter.printerAlign(left);
+  await BluetoothEscposPrinter.printText(`Cargo: ${toTitle(cargo) || "---"}\n`, {});
+  await BluetoothEscposPrinter.printText(`Municipio: ${toTitle(municipio) || "---"}\n`, {});
+  await BluetoothEscposPrinter.printText("\n\n\n", {});
   try {
     await BluetoothEscposPrinter.cutOnePoint();
   } catch {
-    // Algunas impresoras no soportan corte automático
+    // No todas las impresoras soportan corte automatico.
   }
 }
+
+export async function imprimirEscarapela(params: EscarapelaPrintData): Promise<void> {
+  try {
+    await imprimirEscarapelaTsc(params);
+  } catch (error) {
+    await imprimirEscarapelaEscpos(params);
+  }
+}
+
+export const imprimirTicket = imprimirEscarapela;

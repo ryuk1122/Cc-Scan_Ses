@@ -30,4 +30,25 @@ declare module 'react-native-bluetooth-escpos-printer' {
     cutFullPaper(mode?: number): Promise<void>;
     selfTest(): Promise<void>;
   };
+
+  export const BluetoothTscPrinter: {
+    DIRECTION: {
+      FORWARD: number;
+      BACKWARD: number;
+    };
+    DENSITY: Record<string, number>;
+    FONTTYPE: Record<string, string>;
+    FONTMUL: Record<string, number>;
+    ROTATION: Record<string, number>;
+    TEAR: {
+      ON: string;
+      OFF: string;
+    };
+    PRINT_SPEED: Record<string, number>;
+    BARCODETYPE: Record<string, string>;
+    BITMAP_MODE: Record<string, number>;
+    EEC: Record<string, string>;
+    READABLE: Record<string, number>;
+    printLable(options: Record<string, any>): Promise<void>;
+  };
 }

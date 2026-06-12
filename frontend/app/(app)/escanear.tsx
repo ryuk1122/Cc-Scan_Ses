@@ -38,6 +38,11 @@ type ScanResult = {
   cargo?: string;
   municipio?: string;
   cedula?: string;
+  registro?: {
+    nombre?: string;
+    cargo?: string;
+    municipio?: string;
+  };
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -49,6 +54,10 @@ function capitalize(s: string) {
     .split(" ")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
+}
+
+function normalizeAfiliado(response: any) {
+  return response?.afiliado || (response?.encontrado ? response : null) || {};
 }
 
 // ─── componente principal ─────────────────────────────────────────────────────
@@ -121,15 +130,17 @@ export default function EscanearScreen() {
           // no es afiliado o sin conexión — continuar con datos del código
         }
 
+        const afiliado = normalizeAfiliado(afiliadoData);
         const nombre =
-          afiliadoData?.nombre_completo ||
+          afiliado?.nombre_completo ||
+          afiliado?.nombre ||
           [parsed.primer_apellido, parsed.segundo_apellido, parsed.nombres]
             .filter(Boolean)
             .join(" ") ||
           "";
-        const cargo = afiliadoData?.cargo || "";
-        const municipio = afiliadoData?.municipio || parsed.location?.municipality || "";
-        const sede = afiliadoData?.sede || "";
+        const cargo = afiliado?.cargo || "";
+        const municipio = afiliado?.municipio || parsed.location?.municipality || "";
+        const sede = afiliado?.sede || "";
 
         const result = await scan(cedula, {
           nombre,
@@ -149,16 +160,20 @@ export default function EscanearScreen() {
           } as any),
         } as any);
 
+        const printNombre = result.registro?.nombre || nombre;
+        const printCargo = result.registro?.cargo || cargo;
+        const printMunicipio = result.registro?.municipio || municipio;
+
         setLastResult({
           ...result,
-          nombre,
-          cargo,
-          municipio,
+          nombre: printNombre,
+          cargo: printCargo,
+          municipio: printMunicipio,
           cedula,
         });
 
         if (result.ok) {
-          void tryPrint(nombre, cargo, municipio);
+          void tryPrint(printNombre, printCargo, printMunicipio);
         }
       } catch (e: any) {
         setLastResult({ ok: false, mensaje: e?.message || "Error al procesar el código" });
@@ -194,16 +209,20 @@ export default function EscanearScreen() {
         // no es afiliado
       }
 
-      const nombre = afiliadoData?.nombre_completo || "";
-      const cargo = afiliadoData?.cargo || "";
-      const municipio = afiliadoData?.municipio || "";
-      const sede = afiliadoData?.sede || "";
+      const afiliado = normalizeAfiliado(afiliadoData);
+      const nombre = afiliado?.nombre_completo || afiliado?.nombre || "";
+      const cargo = afiliado?.cargo || "";
+      const municipio = afiliado?.municipio || "";
+      const sede = afiliado?.sede || "";
 
       const result = await scan(cedula, { nombre, cargo, municipio, sede });
-      setLastResult({ ...result, nombre, cargo, municipio, cedula });
+      const printNombre = result.registro?.nombre || nombre;
+      const printCargo = result.registro?.cargo || cargo;
+      const printMunicipio = result.registro?.municipio || municipio;
+      setLastResult({ ...result, nombre: printNombre, cargo: printCargo, municipio: printMunicipio, cedula });
 
       if (result.ok) {
-        void tryPrint(nombre, cargo, municipio);
+        void tryPrint(printNombre, printCargo, printMunicipio);
       }
     } catch (e: any) {
       setLastResult({ ok: false, mensaje: e?.message || "Error" });
@@ -312,7 +331,7 @@ export default function EscanearScreen() {
           {imprimiendo && (
             <View style={[styles.processingBadge, { backgroundColor: theme.brand }]}>
               <Ionicons name="print-outline" size={14} color="#fff" />
-              <Text style={styles.processingText}>Imprimiendo ticket…</Text>
+              <Text style={styles.processingText}>Imprimiendo escarapela...</Text>
             </View>
           )}
         </View>
@@ -518,7 +537,11 @@ const styles = StyleSheet.create({
     position: "relative",
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "transparent",

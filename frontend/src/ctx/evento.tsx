@@ -48,7 +48,10 @@ type EventoCtxValue = {
   lastSuccess: { cedula: string; ts: number } | null;
   selectEvento: (id: string, nombre: string) => Promise<void>;
   clearEvento: () => void;
-  scan: (cedula: string, extras?: Partial<Registro> & { raw_barcode?: string }) => Promise<{ ok: boolean; mensaje: string; duplicate?: boolean }>;
+  scan: (
+    cedula: string,
+    extras?: Partial<Registro> & { raw_barcode?: string },
+  ) => Promise<{ ok: boolean; mensaje: string; duplicate?: boolean; registro?: Registro }>;
   refreshRegistros: () => Promise<void>;
 };
 
@@ -398,7 +401,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         if (res?.ok && res.registro) {
           addRegistro(res.registro);
           setLastSuccess({ cedula, ts: Date.now() });
-          return { ok: true, mensaje: "Registrado correctamente" };
+          return { ok: true, mensaje: "Registrado correctamente", registro: res.registro };
         }
         return { ok: false, mensaje: res?.mensaje || "Error" };
       } catch (err: any) {
@@ -438,7 +441,23 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           created_at: new Date().toISOString(),
         });
         setLastSuccess({ cedula, ts: Date.now() });
-        return { ok: true, mensaje: "En cola de sincronizacion. Se enviara cuando vuelva la conexion." };
+        return {
+          ok: true,
+          mensaje: "En cola de sincronizacion. Se enviara cuando vuelva la conexion.",
+          registro: {
+            id: `local_${nonce}`,
+            evento_id: eventoId,
+            cedula,
+            nombre: payload.nombre,
+            sede: payload.sede,
+            municipio: payload.municipio,
+            cargo: payload.cargo,
+            device_id,
+            operator_email: "(pendiente)",
+            timestamp: ts,
+            created_at: new Date().toISOString(),
+          },
+        };
       }
     },
     [eventoId, addRegistro],
