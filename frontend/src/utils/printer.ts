@@ -21,6 +21,8 @@ const PRINTER_NAME_KEY = "printer_name";
 const LABEL_WIDTH_MM = 80;
 const LABEL_HEIGHT_MM = 50;
 const LABEL_GAP_MM = 3;
+const ESC_POS_LINE = "\n\r";
+const ESC_POS_DIVIDER = "--------------------------------";
 
 function cleanText(value?: string): string {
   return String(value || "")
@@ -225,20 +227,23 @@ async function imprimirEscarapelaTsc({ nombre, cargo, municipio }: EscarapelaPri
 async function imprimirEscarapelaEscpos({ nombre, cargo, municipio }: EscarapelaPrintData): Promise<void> {
   const center = BluetoothEscposPrinter.ALIGN.CENTER;
   const left = BluetoothEscposPrinter.ALIGN.LEFT;
-  const nameLines = wrap(nombre, 24, 2).map(toTitle);
+  const nameLines = wrap(nombre, 24, 3).map(toTitle);
+  const cargoText = toTitle(cargo) || "---";
+  const municipioText = toTitle(municipio) || "---";
 
+  await BluetoothEscposPrinter.printerInit();
   await BluetoothEscposPrinter.printerAlign(center);
-  await BluetoothEscposPrinter.printText("SES\n", { widthtimes: 2, heighttimes: 2, fonttype: 1 });
-  await BluetoothEscposPrinter.printText("ESCARAPELA\n", { fonttype: 1 });
-  await BluetoothEscposPrinter.printText("--------------------------------\n", {});
+  await BluetoothEscposPrinter.printText(`SES${ESC_POS_LINE}`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
+  await BluetoothEscposPrinter.printText(`ESCARAPELA${ESC_POS_LINE}`, { fonttype: 1 });
+  await BluetoothEscposPrinter.printText(`${ESC_POS_DIVIDER}${ESC_POS_LINE}`, {});
   for (const line of nameLines) {
-    await BluetoothEscposPrinter.printText(`${line}\n`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
+    await BluetoothEscposPrinter.printText(`${line}${ESC_POS_LINE}`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
   }
-  await BluetoothEscposPrinter.printText("\n", {});
+  await BluetoothEscposPrinter.printText(ESC_POS_LINE, {});
   await BluetoothEscposPrinter.printerAlign(left);
-  await BluetoothEscposPrinter.printText(`Cargo: ${toTitle(cargo) || "---"}\n`, {});
-  await BluetoothEscposPrinter.printText(`Municipio: ${toTitle(municipio) || "---"}\n`, {});
-  await BluetoothEscposPrinter.printText("\n\n\n", {});
+  await BluetoothEscposPrinter.printText(`Cargo: ${cargoText}${ESC_POS_LINE}`, {});
+  await BluetoothEscposPrinter.printText(`Municipio: ${municipioText}${ESC_POS_LINE}`, {});
+  await BluetoothEscposPrinter.printText(`${ESC_POS_LINE}${ESC_POS_LINE}${ESC_POS_LINE}`, {});
   try {
     await BluetoothEscposPrinter.cutOnePoint();
   } catch {
@@ -248,9 +253,9 @@ async function imprimirEscarapelaEscpos({ nombre, cargo, municipio }: Escarapela
 
 export async function imprimirEscarapela(params: EscarapelaPrintData): Promise<void> {
   try {
-    await imprimirEscarapelaTsc(params);
-  } catch (error) {
     await imprimirEscarapelaEscpos(params);
+  } catch (error) {
+    await imprimirEscarapelaTsc(params);
   }
 }
 
