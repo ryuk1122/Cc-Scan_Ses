@@ -74,6 +74,7 @@ type ServerParsedCedula = Partial<Pick<
   | "mrz_valido"
 >>;
 type OcrReadResult = { raw: string; serverParsed?: ServerParsedCedula };
+type PrintPayload = { nombre: string; cargo: string; municipio: string; sede?: string };
 
 function scannedPayload(raw?: string | null, data?: string | null): string {
   for (const value of [raw, data]) {
@@ -103,6 +104,16 @@ function cleanCedulaNumber(value: string | null | undefined): string {
   return cleanQrDigits(String(value || ""));
 }
 
+function normalizeAfiliadoData(response: any): PrintPayload {
+  const afiliado = response?.afiliado || (response?.encontrado ? response : null) || {};
+  return {
+    nombre: afiliado.nombre_completo || afiliado.nombre || "",
+    cargo: afiliado.cargo || "",
+    municipio: afiliado.municipio || "",
+    sede: afiliado.sede || "",
+  };
+}
+
 function capitalize(s: string) {
   if (!s) return "";
   return s
@@ -110,6 +121,23 @@ function capitalize(s: string) {
     .split(" ")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
+}
+
+function parsedFullName(parsed: ParsedCedulaResult): string {
+  return [
+    parsed.nombres,
+    parsed.primer_apellido,
+    parsed.segundo_apellido,
+  ].filter(Boolean).join(" ").trim();
+}
+
+function buildPrintPayload(registro: any, fallback: PrintPayload, parsed: ParsedCedulaResult): PrintPayload {
+  return {
+    nombre: registro?.nombre || fallback.nombre || parsedFullName(parsed),
+    cargo: registro?.cargo || fallback.cargo || "",
+    municipio: registro?.municipio || fallback.municipio || "",
+    sede: registro?.sede || fallback.sede || "",
+  };
 }
 
 function bestDigitCandidate(value: string): string {
@@ -347,19 +375,25 @@ export default function EscanearScreen() {
       try {
         setImprimiendo(true);
         const connected = await conectarImpresoraGuardada();
-        if (!connected) return;
+        if (!connected) {
+          showToast("err", "Sin impresora guardada. Selecciona una impresora Bluetooth.");
+          setShowPrinter(true);
+          return;
+        }
         await imprimirTicket({
           nombre: capitalize(nombre),
           cargo: capitalize(cargo),
           municipio: capitalize(municipio),
         });
+        showToast("ok", "Escarapela enviada a impresora");
       } catch (e: any) {
         console.warn("[Printer]", e?.message ?? e);
+        showToast("err", "Error al imprimir: " + (e?.message ?? "fallo"));
       } finally {
         setImprimiendo(false);
       }
     },
-    [],
+    [showToast],
   );
 
   const captureCameraBase64 = useCallback(async (quality: number): Promise<string> => {
@@ -517,7 +551,26 @@ export default function EscanearScreen() {
         }
         lastScanRef.current = { value: cedula, at: now };
 
+        let lookupPrint: PrintPayload = { nombre: "", cargo: "", municipio: "" };
+        try {
+          const afiliadoResponse = await api.lookupAfiliado(cedula);
+          lookupPrint = normalizeAfiliadoData(afiliadoResponse);
+          setPreview(afiliadoResponse as AfiliadoPreview);
+        } catch {
+          setPreview({ encontrado: false, cedula });
+        }
+        const printFallback: PrintPayload = {
+          nombre: lookupPrint.nombre || parsedFullName(parsed),
+          cargo: lookupPrint.cargo,
+          municipio: lookupPrint.municipio,
+          sede: lookupPrint.sede,
+        };
+
         const res = await scan(cedula, {
+          nombre: printFallback.nombre,
+          cargo: printFallback.cargo,
+          municipio: printFallback.municipio,
+          sede: printFallback.sede,
           raw_barcode: rawToUse,
           primer_apellido: parsed.primer_apellido,
           segundo_apellido: parsed.segundo_apellido,
@@ -528,14 +581,8 @@ export default function EscanearScreen() {
           tipo_sangre: parsed.tipo_sangre,
         } as any);
         if (res.ok) {
-          const printNombre = res.registro?.nombre || [
-            parsed.nombres,
-            parsed.primer_apellido,
-            parsed.segundo_apellido,
-          ].filter(Boolean).join(" ");
-          const printCargo = res.registro?.cargo || "";
-          const printMunicipio = res.registro?.municipio || "";
-          void tryPrint(printNombre, printCargo, printMunicipio);
+          const printData = buildPrintPayload(res.registro, printFallback, parsed);
+          void tryPrint(printData.nombre, printData.cargo, printData.municipio);
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           showToast("ok", `Cédula ${cedula} registrada`);
         } else if (res.duplicate) {

@@ -137,13 +137,16 @@ export async function guardarImpresora(address: string, name: string): Promise<v
   await AsyncStorage.setItem(PRINTER_MAC_KEY, address);
   await AsyncStorage.setItem(PRINTER_NAME_KEY, name || "Impresora Bluetooth");
 }
-
 export async function conectarImpresoraGuardada(): Promise<boolean> {
   try {
     const address = await AsyncStorage.getItem(PRINTER_MAC_KEY);
     if (!address) return false;
     await ensureBluetooth();
-    await connectTo(address);
+    try {
+      await connectTo(address);
+    } catch {
+      // La impresora puede ya estar conectada; intentamos imprimir igual
+    }
     return true;
   } catch {
     return false;
