@@ -23,6 +23,31 @@ const LABEL_HEIGHT_MM = 50;
 const LABEL_GAP_MM = 3;
 const ESC_POS_LINE = "\n\r";
 const ESC_POS_DIVIDER = "--------------------------------";
+const ESC = "\x1b";
+
+type RawEscposPrinter = typeof BluetoothEscposPrinter & {
+  printRawText?: (text: string) => Promise<void>;
+};
+
+const escposTextOptions = {
+  encoding: "GBK",
+  codepage: 0,
+  widthtimes: 0,
+  heigthtimes: 0,
+  fonttype: 0,
+};
+
+const escposTitleOptions = {
+  encoding: "GBK",
+  codepage: 0,
+  widthtimes: 1,
+  heigthtimes: 1,
+  fonttype: 1,
+};
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function cleanText(value?: string): string {
   return String(value || "")
@@ -93,14 +118,37 @@ async function ensureBluetooth(): Promise<void> {
 
 async function connectTo(address: string): Promise<void> {
   await BluetoothManager.connect(address);
+  await wait(250);
+  const connected = await BluetoothManager.isConnected();
+  if (!connected) {
+    throw new Error("No se pudo confirmar la conexion con la impresora.");
+  }
+}
+
+function normalizePrinter(rawValue: unknown): Impresora | null {
+  if (!rawValue) return null;
+  if (typeof rawValue === "string") {
+    try {
+      return normalizePrinter(JSON.parse(rawValue));
+    } catch {
+      return null;
+    }
+  }
+  const value = rawValue as Partial<Impresora>;
+  return value.address
+    ? {
+        address: value.address,
+        name: value.name || "Impresora Bluetooth",
+      }
+    : null;
 }
 
 function parsePrinterList(rawValue: unknown): Impresora[] {
   if (!rawValue) return [];
-  if (Array.isArray(rawValue)) return rawValue as Impresora[];
+  if (Array.isArray(rawValue)) return rawValue.map(normalizePrinter).filter(Boolean) as Impresora[];
   try {
     const parsed = JSON.parse(String(rawValue));
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map(normalizePrinter).filter(Boolean) as Impresora[] : [];
   } catch {
     return [];
   }
@@ -137,18 +185,14 @@ export async function guardarImpresora(address: string, name: string): Promise<v
   await ensureBluetooth();
   await connectTo(address);
   await AsyncStorage.setItem(PRINTER_MAC_KEY, address);
-  await AsyncStorage.setItem(PRINTER_NAME_KEY, name || "Impresora Bluetooth");
+  await AsyncStorage.setItem(PRINTER_NAME_KEY, `${name || "Impresora Bluetooth"} (${address})`);
 }
 export async function conectarImpresoraGuardada(): Promise<boolean> {
   try {
     const address = await AsyncStorage.getItem(PRINTER_MAC_KEY);
     if (!address) return false;
     await ensureBluetooth();
-    try {
-      await connectTo(address);
-    } catch {
-      // La impresora puede ya estar conectada; intentamos imprimir igual
-    }
+    await connectTo(address);
     return true;
   } catch {
     return false;
@@ -232,31 +276,68 @@ async function imprimirEscarapelaEscpos({ nombre, cargo, municipio }: Escarapela
   const municipioText = toTitle(municipio) || "---";
 
   await BluetoothEscposPrinter.printerInit();
+  await BluetoothEscposPrinter.setBlob(0);
   await BluetoothEscposPrinter.printerAlign(center);
-  await BluetoothEscposPrinter.printText(`SES${ESC_POS_LINE}`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
-  await BluetoothEscposPrinter.printText(`ESCARAPELA${ESC_POS_LINE}`, { fonttype: 1 });
-  await BluetoothEscposPrinter.printText(`${ESC_POS_DIVIDER}${ESC_POS_LINE}`, {});
+  await BluetoothEscposPrinter.printText(`SES${ESC_POS_LINE}`, escposTitleOptions);
+  await BluetoothEscposPrinter.printText(`ESCARAPELA${ESC_POS_LINE}`, escposTextOptions);
+  await BluetoothEscposPrinter.printText(`${ESC_POS_DIVIDER}${ESC_POS_LINE}`, escposTextOptions);
   for (const line of nameLines) {
-    await BluetoothEscposPrinter.printText(`${line}${ESC_POS_LINE}`, { widthtimes: 1, heighttimes: 1, fonttype: 1 });
+    await BluetoothEscposPrinter.printText(`${line}${ESC_POS_LINE}`, escposTitleOptions);
   }
-  await BluetoothEscposPrinter.printText(ESC_POS_LINE, {});
+  await BluetoothEscposPrinter.printText(ESC_POS_LINE, escposTextOptions);
   await BluetoothEscposPrinter.printerAlign(left);
-  await BluetoothEscposPrinter.printText(`Cargo: ${cargoText}${ESC_POS_LINE}`, {});
-  await BluetoothEscposPrinter.printText(`Municipio: ${municipioText}${ESC_POS_LINE}`, {});
-  await BluetoothEscposPrinter.printText(`${ESC_POS_LINE}${ESC_POS_LINE}${ESC_POS_LINE}`, {});
-  try {
-    await BluetoothEscposPrinter.cutOnePoint();
-  } catch {
-    // No todas las impresoras soportan corte automatico.
+  await BluetoothEscposPrinter.printText(`Cargo: ${cargoText}${ESC_POS_LINE}`, escposTextOptions);
+  await BluetoothEscposPrinter.printText(`Municipio: ${municipioText}${ESC_POS_LINE}`, escposTextOptions);
+  await BluetoothEscposPrinter.printText(`${ESC_POS_LINE}${ESC_POS_LINE}`, escposTextOptions);
+  await BluetoothEscposPrinter.printAndFeed(80);
+}
+
+async function imprimirEscarapelaRawEscpos({ nombre, cargo, municipio }: EscarapelaPrintData): Promise<void> {
+  const rawPrinter = BluetoothEscposPrinter as RawEscposPrinter;
+  if (!rawPrinter.printRawText) {
+    throw new Error("RAW_ESC_POS_UNAVAILABLE");
   }
+
+  const nameLines = wrap(nombre, 24, 3).map(toTitle);
+  const cargoText = toTitle(cargo) || "---";
+  const municipioText = toTitle(municipio) || "---";
+  const body = [
+    `${ESC}@`,
+    `${ESC}a\x01`,
+    "SES\n",
+    "ESCARAPELA\n",
+    `${ESC_POS_DIVIDER}\n`,
+    ...nameLines.map((line) => `${line}\n`),
+    "\n",
+    `${ESC}a\x00`,
+    `Cargo: ${cargoText}\n`,
+    `Municipio: ${municipioText}\n`,
+    "\n\n\n",
+    `${ESC}d\x04`,
+  ].join("");
+
+  await rawPrinter.printRawText(body);
+  await wait(250);
 }
 
 export async function imprimirEscarapela(params: EscarapelaPrintData): Promise<void> {
   try {
-    await imprimirEscarapelaEscpos(params);
+    await imprimirEscarapelaRawEscpos(params);
   } catch (error) {
-    await imprimirEscarapelaTsc(params);
+    try {
+      await imprimirEscarapelaEscpos(params);
+    } catch {
+      await imprimirEscarapelaTsc(params);
+    }
   }
+}
+
+export async function imprimirPruebaImpresora(): Promise<void> {
+  await imprimirEscarapela({
+    nombre: "PRUEBA IMPRESORA",
+    cargo: "Conexion Bluetooth",
+    municipio: "Y41BT",
+  });
 }
 
 export const imprimirTicket = imprimirEscarapela;

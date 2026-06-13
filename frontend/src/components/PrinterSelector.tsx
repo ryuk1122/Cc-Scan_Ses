@@ -5,13 +5,20 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { theme } from '@/src/theme';
-import { listarImpresoras, guardarImpresora, type Impresora } from '@/src/utils/printer';
+import {
+  listarImpresoras,
+  guardarImpresora,
+  conectarImpresoraGuardada,
+  imprimirPruebaImpresora,
+  type Impresora,
+} from '@/src/utils/printer';
 
 export default function PrinterSelector() {
   const [lista, setLista] = useState<Impresora[]>([]);
   const [cargando, setCargando] = useState(false);
   const [guardada, setGuardada] = useState<string | null>(null);
   const [conectando, setConectando] = useState<string | null>(null);
+  const [probando, setProbando] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem('printer_name').then(n => setGuardada(n));
@@ -32,7 +39,8 @@ export default function PrinterSelector() {
     setConectando(device.address);
     try {
       await guardarImpresora(device.address, device.name);
-      setGuardada(device.name);
+      await imprimirPruebaImpresora();
+      setGuardada(`${device.name} (${device.address})`);
       Alert.alert('✓ Conectado', device.name);
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -41,10 +49,32 @@ export default function PrinterSelector() {
     }
   };
 
+  const probarGuardada = async () => {
+    setProbando(true);
+    try {
+      const connected = await conectarImpresoraGuardada();
+      if (!connected) {
+        Alert.alert('Error', 'No se pudo conectar la impresora guardada.');
+        return;
+      }
+      await imprimirPruebaImpresora();
+      Alert.alert('Prueba enviada', 'Se envio una prueba a la impresora guardada.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setProbando(false);
+    }
+  };
+
   return (
     <View style={s.wrap}>
       {guardada && (
         <Text style={s.activa}>🖨 Impresora activa: {guardada}</Text>
+      )}
+      {guardada && (
+        <TouchableOpacity onPress={probarGuardada} style={s.testBtn} disabled={probando}>
+          <Text style={s.testBtnText}>{probando ? 'Probando...' : 'Probar impresora guardada'}</Text>
+        </TouchableOpacity>
       )}
       <TouchableOpacity onPress={buscar} style={s.btn}>
         <Text style={s.btnText}>
@@ -72,6 +102,8 @@ const s = StyleSheet.create({
   activa: { color: theme.success, fontWeight: '700', fontSize: 13 },
   btn: { backgroundColor: theme.brand, padding: 12, borderRadius: 8 },
   btnText: { color: '#fff', textAlign: 'center', fontWeight: '700' },
+  testBtn: { backgroundColor: theme.surface, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: theme.border },
+  testBtnText: { color: theme.text, textAlign: 'center', fontWeight: '700' },
   item: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     padding: 12, borderWidth: 1, borderColor: theme.border,

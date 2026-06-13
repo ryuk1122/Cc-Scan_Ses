@@ -77,7 +77,7 @@ index d86e4f5..8d58705 100644
  }
 \ No newline at end of file
 diff --git a/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/RNBluetoothManagerModule.java b/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/RNBluetoothManagerModule.java
-index dd5d33e..bcdf209 100644
+index dd5d33e..a6d3f67 100644
 --- a/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/RNBluetoothManagerModule.java
 +++ b/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/RNBluetoothManagerModule.java
 @@ -10,8 +10,8 @@ import android.content.Intent;
@@ -91,3 +91,40 @@ index dd5d33e..bcdf209 100644
  import android.util.Log;
  import android.widget.Toast;
  import com.facebook.react.bridge.*;
+@@ -159,6 +159,11 @@ public class RNBluetoothManagerModule extends ReactContextBaseJavaModule
+         }
+     }
+ 
++    @ReactMethod
++    public void isConnected(final Promise promise) {
++        promise.resolve(mService != null && mService.getState() == BluetoothService.STATE_CONNECTED);
++    }
++
+     @ReactMethod
+     public void isBluetoothEnabled(final Promise promise) {
+         BluetoothAdapter adapter = this.getBluetoothAdapter();
+diff --git a/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/escpos/RNBluetoothEscposPrinterModule.java b/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/escpos/RNBluetoothEscposPrinterModule.java
+index 3fa7409..cdcbe43 100644
+--- a/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/escpos/RNBluetoothEscposPrinterModule.java
++++ b/node_modules/react-native-bluetooth-escpos-printer/android/src/main/java/cn/jystudio/bluetooth/escpos/RNBluetoothEscposPrinterModule.java
+@@ -161,6 +161,20 @@ public class RNBluetoothEscposPrinterModule extends ReactContextBaseJavaModule
+         }
+     }
+ 
++    @ReactMethod
++    public void printRawText(String text, final Promise promise) {
++        try {
++            byte[] data = text.getBytes("GBK");
++            if (sendDataByte(data)) {
++                promise.resolve(null);
++            } else {
++                promise.reject("COMMAND_NOT_SEND");
++            }
++        } catch (Exception e) {
++            promise.reject(e.getMessage(), e);
++        }
++    }
++
+     @ReactMethod
+     public void printColumn(ReadableArray columnWidths,ReadableArray columnAligns,ReadableArray columnTexts,
+                             @Nullable ReadableMap options,final Promise promise){
