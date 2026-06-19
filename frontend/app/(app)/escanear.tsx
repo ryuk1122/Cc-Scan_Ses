@@ -501,10 +501,10 @@ export default function EscanearScreen() {
               inheritedServerParsed = iaResult || undefined;
             }
             if (!iaCedula) {
-              showToast("err", "IA sin resultado. Probando MRZ, QR y barras...");
+              showToast("err", "IA sin resultado. Probando QR/DataMatrix, MRZ y barras...");
               const barcodeResult: OcrReadResult = options.skipBarcodeFallback || !imageBase64
                 ? { raw: "" }
-                : await readCameraBarcode(false, imageBase64, { preferMrz: true });
+                : await readCameraBarcode(false, imageBase64, { preferMrz: false });
               fallbackRaw = barcodeResult.raw;
               if (barcodeResult.serverParsed) inheritedServerParsed = barcodeResult.serverParsed;
             }
@@ -626,8 +626,8 @@ export default function EscanearScreen() {
       return;
     }
 
-    showToast("err", "IA sin resultado. Intentando MRZ, QR y barras...");
-    const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
+    showToast("err", "IA sin resultado. Intentando QR/DataMatrix, MRZ y barras...");
+    const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: false });
     if (barcodeResult.raw) {
       await handleScan(barcodeResult.raw, {
         skipBarcodeFallback: true,
@@ -765,7 +765,7 @@ export default function EscanearScreen() {
   facing="back"
   autofocus="on"
   barcodeScannerSettings={{
-    barcodeTypes: ["pdf417", "qr"],
+    barcodeTypes: ["pdf417", "qr", "datamatrix"],
   }}
   onBarcodeScanned={({ raw, data }) => {
     const payload = scannedPayload(raw, data);

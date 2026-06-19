@@ -1,6 +1,7 @@
 import barcode_service
 
 from barcode_service import extract_qr_identity_number
+from PIL import Image
 
 
 def test_extract_qr_registraduria_nuip_url():
@@ -22,6 +23,37 @@ def test_extract_qr_json_payload():
     raw = '{"document_number":"1.023.456.789","nombre":"LAURA"}'
 
     assert extract_qr_identity_number(raw) == "1023456789"
+
+
+def test_decode_2d_identity_tries_datamatrix(monkeypatch):
+    calls = []
+
+    class FakeBarcodeFormat:
+        QRCode = "QRCode"
+        DataMatrix = "DataMatrix"
+        Aztec = "Aztec"
+
+    class FakeZxing:
+        BarcodeFormat = FakeBarcodeFormat
+
+        @staticmethod
+        def read_barcodes(_image, formats=None, **_kwargs):
+            calls.append(formats)
+            if formats != "DataMatrix":
+                return []
+            return [type("Result", (), {
+                "text": '{"nuip":"1023456789","nombre":"LAURA"}',
+                "bytes": b"",
+                "format": "DataMatrix",
+            })()]
+
+    monkeypatch.setattr(barcode_service, "zxingcpp", FakeZxing)
+
+    result = barcode_service._decode_qr_from_image(Image.new("RGB", (300, 300), "white"))
+
+    assert result["cedula"] == "1023456789"
+    assert result["source"] == "qr_datamatrix"
+    assert "DataMatrix" in calls
 
 
 def test_decode_identity_prefer_mrz_tries_mrz_before_pdf417(monkeypatch):

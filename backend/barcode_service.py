@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import urllib.parse
 from typing import Any, Dict, List
@@ -77,6 +78,30 @@ def _best_qr_digit_candidate(value: str) -> str:
     return candidates[0][0] if candidates else ""
 
 
+def _extract_qr_identity_from_json(value: str) -> str:
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return ""
+
+    stack = [parsed]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (str, int, float)):
+            found = extract_qr_identity_number(str(current))
+            if found:
+                return found
+        elif isinstance(current, dict):
+            priority_items = sorted(
+                current.items(),
+                key=lambda item: 0 if re.search(r"nuip|cedula|document|numero|identific|cc", str(item[0]), re.IGNORECASE) else 1,
+            )
+            stack.extend(value for _key, value in priority_items)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return ""
+
+
 def extract_qr_identity_number(raw: str) -> str:
     original = str(raw or "").strip()
     if not original:
@@ -111,6 +136,11 @@ def extract_qr_identity_number(raw: str) -> str:
 
         if re.search(r"registraduria\.gov\.co|wsp\.registraduria|ceduladigital|cedula", value, re.IGNORECASE):
             digits = _best_qr_digit_candidate(value)
+            if digits:
+                return digits
+
+        if value.lstrip().startswith(("{", "[")):
+            digits = _extract_qr_identity_from_json(value)
             if digits:
                 return digits
 
@@ -244,55 +274,65 @@ def _decode_qr_from_image(image: Image.Image) -> dict:
     seen: set[str] = set()
     all_raw: List[str] = []
     base = ImageOps.exif_transpose(image).convert("RGB")
+    barcode_formats = [
+        fmt for fmt in (
+            getattr(zxingcpp.BarcodeFormat, "QRCode", None),
+            getattr(zxingcpp.BarcodeFormat, "DataMatrix", None),
+            getattr(zxingcpp.BarcodeFormat, "Aztec", None),
+        )
+        if fmt is not None
+    ]
     fast_variants: List[Image.Image] = []
     for crop in _qr_crop_candidates(base):
         fast_variants.append(crop)
         fast_variants.append(ImageOps.autocontrast(ImageOps.grayscale(crop), cutoff=2))
 
     for variant in [*fast_variants, *_variants(base)]:
-        try:
-            results = zxingcpp.read_barcodes(
-                variant,
-                formats=zxingcpp.BarcodeFormat.QRCode,
-                try_rotate=True,
-                try_downscale=True,
-            )
-        except Exception:
-            continue
-
-        for result in results:
-            raw, _raw_bytes = _barcode_raw(result)
-            raw = (raw or "").strip()
-            if not raw or raw in seen:
+        for barcode_format in barcode_formats:
+            try:
+                results = zxingcpp.read_barcodes(
+                    variant,
+                    formats=barcode_format,
+                    try_rotate=True,
+                    try_downscale=True,
+                )
+            except Exception:
                 continue
-            seen.add(raw)
-            all_raw.append(raw)
-            qr_cedula = extract_qr_identity_number(raw)
-            parsed = parse_pdf417(raw)
-            cedula = parsed.get("cedula") or qr_cedula or extract_cedula(raw) or ""
-            has_identity_hint = (
-                bool(qr_cedula)
-                or "IDCOL" in raw
-                or "<<" in raw
-                or "|" in raw
-                or QR_IDENTITY_HINT_RE.search(raw)
-                or str(parsed.get("formato_detectado") or "") not in ("", "desconocido", "numero_puro")
-            )
-            if cedula and has_identity_hint:
-                if qr_cedula and not parsed.get("cedula"):
-                    parsed["cedula"] = qr_cedula
-                parsed["formato_detectado"] = parsed.get("formato_detectado") or "qr"
-                return {
-                    "ok": True,
-                    "raw": raw,
-                    "cedula": cedula,
-                    "parsed": parsed,
-                    "format": str(getattr(result, "format", "QRCode")),
-                    "source": "qr",
-                    "candidates": all_raw[:5],
-                }
 
-    return {"ok": False, "error": "No se detecto QR con cedula", "raw": "", "cedula": "", "parsed": {}, "candidates": all_raw[:5]}
+            for result in results:
+                raw, _raw_bytes = _barcode_raw(result)
+                raw = (raw or "").strip()
+                if not raw or raw in seen:
+                    continue
+                seen.add(raw)
+                all_raw.append(raw)
+                qr_cedula = extract_qr_identity_number(raw)
+                parsed = parse_pdf417(raw)
+                cedula = parsed.get("cedula") or qr_cedula or extract_cedula(raw) or ""
+                result_format = str(getattr(result, "format", barcode_format))
+                has_identity_hint = (
+                    bool(qr_cedula)
+                    or "IDCOL" in raw
+                    or "<<" in raw
+                    or "|" in raw
+                    or QR_IDENTITY_HINT_RE.search(raw)
+                    or str(parsed.get("formato_detectado") or "") not in ("", "desconocido", "numero_puro")
+                )
+                if cedula and has_identity_hint:
+                    if qr_cedula and not parsed.get("cedula"):
+                        parsed["cedula"] = qr_cedula
+                    parsed["formato_detectado"] = parsed.get("formato_detectado") or "qr_2d"
+                    return {
+                        "ok": True,
+                        "raw": raw,
+                        "cedula": cedula,
+                        "parsed": parsed,
+                        "format": result_format,
+                        "source": "qr_datamatrix",
+                        "candidates": all_raw[:5],
+                    }
+
+    return {"ok": False, "error": "No se detecto QR/DataMatrix con cedula", "raw": "", "cedula": "", "parsed": {}, "candidates": all_raw[:5]}
 
 
 def decode_qr_from_base64(image_base64: str) -> dict:
