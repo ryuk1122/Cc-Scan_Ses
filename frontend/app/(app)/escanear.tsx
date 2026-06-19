@@ -767,7 +767,7 @@ export default function EscanearScreen() {
   barcodeScannerSettings={{
     barcodeTypes: ["pdf417", "qr", "datamatrix"],
   }}
-  onBarcodeScanned={({ raw, data }) => {
+  onBarcodeScanned={({ raw, data, type }) => {
     const payload = scannedPayload(raw, data);
     if (!payload) return;
     const normalized = normalizeQrCedulaPayload(payload);
@@ -780,8 +780,11 @@ export default function EscanearScreen() {
       return;
     }
     lastRawScanRef.current = { value: normalized, at: now };
-    if (!isReliableBarcode(normalized, mode)) return;
-    void handleScan(normalized, { skipBarcodeFallback: true });
+    const reliable = isReliableBarcode(normalized, mode);
+    const nativeType = String(type || "").toLowerCase();
+    const isNative2d = nativeType.includes("qr") || nativeType.includes("matrix") || nativeType.includes("aztec");
+    if (!reliable && !isNative2d) return;
+    void handleScan(normalized, { skipBarcodeFallback: reliable });
               }}>
               <View style={styles.reticleOverlay} pointerEvents="none">
                 <View
@@ -800,7 +803,7 @@ export default function EscanearScreen() {
                     <View style={styles.mrzGuideLine} />
                   </View>
                 </View>
-                <Text style={styles.reticleHint}>Centra la cedula: barras, QR o MRZ</Text>
+                <Text style={styles.reticleHint}>Centra la cedula: QR/DataMatrix, barras o MRZ</Text>
               </View>
               <View style={styles.captureBar}>
                 <TouchableOpacity
