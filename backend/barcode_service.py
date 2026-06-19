@@ -337,13 +337,19 @@ def _decode_mrz_from_base64(image_base64: str) -> dict:
 
 
 def decode_identity_document_from_base64(image_base64: str, prefer_mrz: bool = False) -> dict:
+    if prefer_mrz:
+        mrz = _decode_mrz_from_base64(image_base64)
+        if mrz.get("cedula"):
+            return mrz
+
     qr = decode_qr_from_base64(image_base64)
     if qr.get("cedula"):
         return qr
 
-    mrz = _decode_mrz_from_base64(image_base64)
-    if mrz.get("cedula"):
-        return mrz
+    if not prefer_mrz:
+        mrz = _decode_mrz_from_base64(image_base64)
+        if mrz.get("cedula"):
+            return mrz
 
     pdf417 = decode_barcode_from_base64(image_base64)
     if pdf417.get("cedula"):

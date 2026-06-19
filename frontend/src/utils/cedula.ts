@@ -293,13 +293,39 @@ function formatMrzDate(yymmdd: string, future = false): string {
 }
 
 function candidateMrzLines(raw: string): string[] {
-  const lines = String(raw || "")
+  const cleanedLines = String(raw || "")
     .toUpperCase()
     .split(/\r?\n/)
     .map(cleanMrzCandidate)
+    .filter(Boolean);
+  const lines = cleanedLines
     .filter((line) => MRZ_LINE_RE.test(line))
     .map((line) => line.slice(0, 30).padEnd(30, "<"));
   if (lines.length >= 3) return lines.slice(0, 3);
+
+  for (let idx = 0; idx < cleanedLines.length; idx += 1) {
+    const line = cleanedLines[idx];
+    if (!line.startsWith("IDCOL") && !line.startsWith("ICCOL")) continue;
+    const l1 = line.slice(0, 30).padEnd(30, "<");
+    for (let j = idx + 1; j < Math.min(cleanedLines.length, idx + 6); j += 1) {
+      const possibleL2 = cleanedLines[j];
+      const normalizedL2 = possibleL2.replace(/0/g, "O").replace(/1/g, "I");
+      if (!/^\d{6}\d[MF]\d{6}\d/.test(fixMrzDigits(possibleL2)) || !normalizedL2.includes("COL")) continue;
+      const nameFragments: string[] = [];
+      for (const fragment of cleanedLines.slice(j + 1, j + 6)) {
+        if (fragment.startsWith("IDCOL") || fragment.startsWith("ICCOL")) break;
+        if (/[A-Z]/.test(fragment)) nameFragments.push(fragment);
+        if (nameFragments.join("").length >= 10 && /<<[A-Z]/.test(nameFragments.join(""))) break;
+      }
+      if (nameFragments.length) {
+        return [
+          l1,
+          possibleL2.slice(0, 30).padEnd(30, "<"),
+          nameFragments.join("").slice(0, 30).padEnd(30, "<"),
+        ];
+      }
+    }
+  }
 
   const compact = cleanMrzCandidate(String(raw || ""));
   for (const prefix of ["IDCOL", "ICCOL"]) {
@@ -314,6 +340,10 @@ function candidateMrzLines(raw: string): string[] {
     }
   }
   return [];
+}
+
+function stripIccolInternalNumber(raw: string): string {
+  return String(raw || "").replace(/IC\s*<?\s*COL[0-9OQDILBSZ<\s]{5,28}/gi, " ");
 }
 
 export function parseMrz(raw: string | null | undefined): ParsedCedula {
@@ -396,7 +426,7 @@ function emptyParsed(raw: string | null | undefined): ParsedCedula {
 
 export function extractCedula(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const s = String(raw).trim();
+  let s = String(raw).trim();
   if (!s) return null;
 
   const classic = parseClassicPdf417(s);
@@ -404,6 +434,8 @@ export function extractCedula(raw: string | null | undefined): string | null {
 
   const mrz = parseMrz(s);
   if (mrz.cedula) return cleanLeadingZeros(mrz.cedula) ? mrz.cedula : null;
+
+  s = stripIccolInternalNumber(s);
 
   if (/^\d{5,11}$/.test(s) && !isDateLike(s)) {
     return cleanLeadingZeros(s) ? s : null;
@@ -454,13 +486,14 @@ export function extractCedula(raw: string | null | undefined): string | null {
 export function parsePdf417(raw: string | null | undefined): ParsedCedula {
   const out = emptyParsed(raw);
   if (!raw) return out;
-  const s = String(raw).trim();
+  let s = String(raw).trim();
 
   const classic = parseClassicPdf417(s);
   if (classic.cedula) return classic;
 
   const mrz = parseMrz(s);
   if (mrz.cedula) Object.assign(out, mrz);
+  else s = stripIccolInternalNumber(s);
 
   const colombianDash = s.toUpperCase().match(COLOMBIAN_DASH_PAYLOAD_RE);
   if (!out.cedula && colombianDash) {

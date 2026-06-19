@@ -491,30 +491,36 @@ export default function EscanearScreen() {
 
         if (!canUseServerParsed() && !isReliableBarcode(rawToUse, mode)) {
           if (mode === "camera") {
-            showToast("err", "Codigo incompleto. Probando lector dedicado...");
-            const barcodeResult: OcrReadResult = options.skipBarcodeFallback ? { raw: "" } : await readCameraBarcode(false, undefined, { preferMrz: true });
-            let fallbackRaw = barcodeResult.raw;
-            if (barcodeResult.serverParsed) inheritedServerParsed = barcodeResult.serverParsed;
-            if (!fallbackRaw) {
-              const ocrResult = await readCameraWithOcr();
-              fallbackRaw = ocrResult.raw;
-              inheritedServerParsed = ocrResult.serverParsed;
+            const imageBase64 = await captureCameraBase64(0.92);
+            showToast("err", "Codigo incompleto. Intentando con IA...");
+            const iaResult = imageBase64 ? await readCameraWithGemini(imageBase64) : null;
+            const iaCedula = cleanCedulaNumber(iaResult?.cedula);
+            let fallbackRaw = "";
+            if (iaCedula) {
+              rawToUse = iaCedula;
+              inheritedServerParsed = iaResult || undefined;
             }
-            if (fallbackRaw) {
+            if (!iaCedula) {
+              showToast("err", "IA sin resultado. Probando MRZ, QR y barras...");
+              const barcodeResult: OcrReadResult = options.skipBarcodeFallback || !imageBase64
+                ? { raw: "" }
+                : await readCameraBarcode(false, imageBase64, { preferMrz: true });
+              fallbackRaw = barcodeResult.raw;
+              if (barcodeResult.serverParsed) inheritedServerParsed = barcodeResult.serverParsed;
+            }
+            if (!iaCedula && !fallbackRaw && imageBase64) {
+              showToast("err", "MRZ/QR sin resultado. Intentando OCR...");
+              const ocrResult = await readCameraWithOcr(imageBase64);
+              fallbackRaw = ocrResult.raw;
+              if (ocrResult.serverParsed) inheritedServerParsed = ocrResult.serverParsed;
+            }
+            if (!iaCedula && fallbackRaw) {
               rawToUse = normalizeQrCedulaPayload(fallbackRaw);
-            } else {
-              // Fallback Gemini IA — último recurso dentro de handleScan
-              showToast("err", "Intentando con IA...");
-              const iaResult = await readCameraWithGemini();
-              const iaCedula = cleanCedulaNumber(iaResult?.cedula);
-              if (iaCedula) {
-                rawToUse = iaCedula;
-                inheritedServerParsed = iaResult || undefined;
-              } else {
-                await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-                showToast("err", "No pude leerla. Alinea la cedula completa y evita reflejos.");
-                return;
-              }
+            } else if (!iaCedula) {
+              // All image readers failed for this capture.
+              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+              showToast("err", "No pude leerla. Alinea la cedula completa y evita reflejos.");
+              return;
             }
           } else {
             await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
@@ -597,7 +603,7 @@ export default function EscanearScreen() {
         scanBusyRef.current = false;
       }
     },
-    [mode, scan, showToast, flashDuplicate, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, buildDocumentPreview, tryPrint],
+    [mode, scan, showToast, flashDuplicate, captureCameraBase64, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, buildDocumentPreview, tryPrint],
   );
 
   const captureAndDecodeBarcode = useCallback(async () => {
@@ -620,22 +626,22 @@ export default function EscanearScreen() {
       return;
     }
 
-    showToast("err", "IA sin resultado. Intentando OCR/MRZ...");
-    const ocrResult = await readCameraWithOcr(imageBase64);
-    if (ocrResult.raw) {
-      await handleScan(ocrResult.raw, {
-        skipBarcodeFallback: true,
-        serverParsed: ocrResult.serverParsed,
-      });
-      return;
-    }
-
-    showToast("err", "OCR sin resultado. Intentando QR, barras y MRZ...");
+    showToast("err", "IA sin resultado. Intentando MRZ, QR y barras...");
     const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
     if (barcodeResult.raw) {
       await handleScan(barcodeResult.raw, {
         skipBarcodeFallback: true,
         serverParsed: barcodeResult.serverParsed,
+      });
+      return;
+    }
+
+    showToast("err", "MRZ/QR sin resultado. Intentando OCR...");
+    const ocrResult = await readCameraWithOcr(imageBase64);
+    if (ocrResult.raw) {
+      await handleScan(ocrResult.raw, {
+        skipBarcodeFallback: true,
+        serverParsed: ocrResult.serverParsed,
       });
       return;
     }

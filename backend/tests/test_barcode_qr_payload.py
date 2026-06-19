@@ -53,4 +53,4 @@ def test_decode_identity_prefer_mrz_tries_mrz_before_pdf417(monkeypatch):
     result = barcode_service.decode_identity_document_from_base64("fake-image", prefer_mrz=True)
 
     assert result["cedula"] == "1234567890"
-    assert calls == ["qr", "mrz"]
+    assert calls == ["mrz"]

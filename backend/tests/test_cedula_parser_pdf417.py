@@ -145,3 +145,22 @@ def test_parse_new_colombian_iccol_mrz_cleans_cf_ocr_filler_before_given_name():
     assert parsed["cedula"] == "1234567890"
     assert parsed["primer_apellido"] == "WALTEROS"
     assert parsed["nombres"] == "LAURA"
+
+
+def test_extract_cedula_does_not_use_iccol_internal_serial():
+    assert extract_cedula("ICCOL000000012<<<<<<<<<<<<<<<<") is None
+
+
+def test_parse_iccol_mrz_with_split_name_lines_from_ocr():
+    raw = "\n".join([
+        "ICCOLOODQQO001 2<<<<<<<dcdedcccs",
+        "8808213F3101300C0L1234567890<9",
+        "WALTEROS<<<<<",
+        "AURA",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["nombres"] == "AURA"

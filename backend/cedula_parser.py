@@ -298,12 +298,35 @@ def _clean_mrz_name_token(value: str) -> str:
 
 def _candidate_mrz_lines(raw: str) -> List[str]:
     lines: List[str] = []
+    cleaned_lines: List[str] = []
     for line in re.split(r"[\r\n]+", (raw or "").upper()):
         compact = _clean_mrz_candidate(line)
+        if compact:
+            cleaned_lines.append(compact)
         if MRZ_LINE_RE.match(compact):
             lines.append(compact[:30].ljust(30, "<"))
     if len(lines) >= 3:
         return lines[:3]
+
+    for idx, line in enumerate(cleaned_lines):
+        if not (line.startswith("IDCOL") or line.startswith("ICCOL")):
+            continue
+        l1 = line[:30].ljust(30, "<")
+        for j in range(idx + 1, min(len(cleaned_lines), idx + 6)):
+            possible_l2 = cleaned_lines[j]
+            normalized_l2 = possible_l2.replace("0", "O").replace("1", "I")
+            if not (re.match(r"^\d{6}\d[MF]\d{6}\d", _fix_mrz_digits(possible_l2)) and "COL" in normalized_l2):
+                continue
+            name_fragments: List[str] = []
+            for fragment in cleaned_lines[j + 1:j + 6]:
+                if fragment.startswith(("IDCOL", "ICCOL")):
+                    break
+                if re.search(r"[A-Z]", fragment):
+                    name_fragments.append(fragment)
+                if len("".join(name_fragments)) >= 10 and re.search(r"<<[A-Z]", "".join(name_fragments)):
+                    break
+            if name_fragments:
+                return [l1, possible_l2[:30].ljust(30, "<"), "".join(name_fragments)[:30].ljust(30, "<")]
 
     compact = _clean_mrz_candidate(raw)
     # Buscar IDCOL (cédulas antiguas) o ICCOL (cédulas nuevas 2022+)
@@ -313,6 +336,10 @@ def _candidate_mrz_lines(raw: str) -> List[str]:
             chunk = compact[start:start + 90]
             return [chunk[0:30].ljust(30, "<"), chunk[30:60].ljust(30, "<"), chunk[60:90].ljust(30, "<")]
     return []
+
+
+def _remove_iccol_internal_number(raw: str) -> str:
+    return re.sub(r"IC\s*<?\s*COL[0-9OQDILBSZ<\s]{5,28}", " ", raw or "", flags=re.IGNORECASE)
 
 
 def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
@@ -692,6 +719,10 @@ def extract_cedula(raw: Optional[str]) -> Optional[str]:
     classic = parse_pdf417_bytes(_raw_to_pdf417_bytes(raw), s)
     if classic.get("cedula"):
         return classic["cedula"]
+    mrz = parse_mrz_from_text(s)
+    if mrz.get("cedula"):
+        return mrz["cedula"]
+    s = _remove_iccol_internal_number(s)
 
     # Caso trivial: ya es un número puro
     if s.isdigit() and _MIN_DIGITS <= len(s) <= _MAX_DIGITS:
