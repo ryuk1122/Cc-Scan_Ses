@@ -154,9 +154,16 @@ export const api = {
   ): Promise<any> => {
     if (!BASE) throw { status: 0, detail: "EXPO_PUBLIC_BACKEND_URL no está configurada" } as ApiError;
     const t = await getToken();
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    const inferredType =
+      file.mimeType ||
+      (ext === "csv" ? "text/csv" : "") ||
+      (ext === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "") ||
+      (ext === "xls" ? "application/vnd.ms-excel" : "") ||
+      "application/octet-stream";
     const form = new FormData();
     // @ts-ignore — React Native FormData acepta este formato de objeto
-    form.append("file", { uri: file.uri, name: file.name, type: file.mimeType || "application/octet-stream" });
+    form.append("file", { uri: file.uri, name: file.name || `afiliados.${ext || "csv"}`, type: inferredType });
     const res = await fetch(`${BASE}/api/admin/afiliados/import`, {
       method: "POST",
       headers: { Authorization: `Bearer ${t}` },

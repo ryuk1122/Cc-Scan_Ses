@@ -11,6 +11,7 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 openpyxl==3.1.5
 xlsxwriter==3.2.9
+xlrd==2.0.1
 pillow==10.4.0
 pytesseract==0.3.13
 numpy==1.26.4

@@ -75,6 +75,8 @@ agenthub/agents/youtube/db
 
 # Build caches
 .cache/
+.gradle-home/
+.gradle-local/
 .expo/
 **/.expo/
 **/.metro-cache/

@@ -23,9 +23,12 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 import asyncio
 import hashlib
+import html as html_lib
 import io
 import logging
 import os
+import re
+import unicodedata
 import uuid
 import csv as csv_lib
 import jwt
@@ -596,45 +599,36 @@ async def admin_ia_status(current=Depends(require_admin)):
 
 @api.post("/admin/afiliados/import")
 async def import_afiliados(file: UploadFile = File(...), current=Depends(require_admin)):
-    """Importa afiliados desde CSV (con separador ; o ,) o XLSX. Upserts por cédula."""
+    """Importa afiliados desde CSV, XLS, XLSX o reportes XLS en HTML. Upserts por cedula."""
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Archivo vacío")
     fname = (file.filename or "").lower()
     items: List[Dict[str, Any]] = []
     try:
-        if fname.endswith(".csv") or fname.endswith(".txt"):
-            for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
-                try:
-                    text = content.decode(enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
-                raise ValueError("No se pudo decodificar el CSV")
-            sample = text.splitlines()[0] if text else ""
-            delim  = ";" if sample.count(";") > sample.count(",") else ","
-            reader = csv_lib.DictReader(io.StringIO(text), delimiter=delim)
-            for raw_row in reader:
-                row = {k.lower().strip(): (v or "").strip() for k, v in raw_row.items() if k}
-                _ingest_afiliado_row(row, items)
+        if _looks_like_html_table(content):
+            _ingest_html_table(content, items)
+        elif fname.endswith((".csv", ".txt")):
+            _ingest_csv(content, items)
+        elif fname.endswith(".xlsx") or content[:2] == b"PK":
+            _ingest_xlsx(content, items)
+        elif fname.endswith(".xls"):
+            _ingest_xls(content, items)
         else:
             try:
-                from openpyxl import load_workbook
-            except ImportError:
-                raise HTTPException(status_code=500, detail="openpyxl no instalado")
-            wb = load_workbook(io.BytesIO(content), data_only=True)
-            ws = wb.active
-            rows_iter = ws.iter_rows(values_only=True)
-            header = [str(c).lower().strip() if c is not None else "" for c in next(rows_iter, [])]
-            for r in rows_iter:
-                row = {header[i]: ("" if v is None else str(v).strip()) for i, v in enumerate(r) if i < len(header)}
-                _ingest_afiliado_row(row, items)
+                _ingest_csv(content, items)
+            except Exception:
+                if _looks_like_html_table(content):
+                    _ingest_html_table(content, items)
+                else:
+                    _ingest_xlsx(content, items)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"No se pudo leer: {e}")
 
+    raw_total = len(items)
+    items = _dedupe_afiliado_items(items)
     if not items:
         raise HTTPException(status_code=400, detail="No se encontraron filas válidas con cédula")
 
@@ -653,34 +647,176 @@ async def import_afiliados(file: UploadFile = File(...), current=Depends(require
         res = await db.afiliados.bulk_write(ops, ordered=False)
         inserted += res.upserted_count or 0
         updated  += res.modified_count or 0
-    return {"ok": True, "total": len(items), "insertados": inserted, "actualizados": updated}
+    return {
+        "ok": True,
+        "total": len(items),
+        "duplicados_omitidos": raw_total - len(items),
+        "insertados": inserted,
+        "actualizados": updated,
+    }
+
+
+def _dedupe_afiliado_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        ced = item.get("cedula")
+        if not ced:
+            continue
+        if ced not in deduped:
+            deduped[ced] = item
+            continue
+        current = deduped[ced]
+        for key, value in item.items():
+            if value not in (None, ""):
+                current[key] = value
+    return list(deduped.values())
+
+
+def _decode_import_text(content: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+        try:
+            return content.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _clean_import_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    text = str(value)
+    text = text.replace("\x00", "").replace("\ufeff", "").replace("\ufffd", "")
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    if "Ã" in text or "Â" in text:
+        try:
+            text = text.encode("latin-1").decode("utf-8")
+        except UnicodeError:
+            pass
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_import_key(value: Any) -> str:
+    text = _clean_import_cell(value).lower()
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return text.strip()
+
+
+def _looks_like_html_table(content: bytes) -> bool:
+    sample = content.lstrip()[:512].lower()
+    return sample.startswith((b"<table", b"<!doctype", b"<html")) or b"<table" in sample
+
+
+def _row_from_header(header: List[Any], values: List[Any]) -> Dict[str, str]:
+    row: Dict[str, str] = {}
+    for i, key in enumerate(header):
+        norm_key = _normalize_import_key(key)
+        if not norm_key:
+            continue
+        value = values[i] if i < len(values) else ""
+        row[norm_key] = _clean_import_cell(value)
+    return row
+
+
+def _ingest_csv(content: bytes, items: List[Dict[str, Any]]) -> None:
+    text = _decode_import_text(content)
+    sample = text.splitlines()[0] if text else ""
+    delim = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv_lib.DictReader(io.StringIO(text), delimiter=delim)
+    for raw_row in reader:
+        row = {_normalize_import_key(k): _clean_import_cell(v) for k, v in raw_row.items() if k}
+        _ingest_afiliado_row(row, items)
+
+
+def _ingest_html_table(content: bytes, items: List[Dict[str, Any]]) -> None:
+    text = _decode_import_text(content)
+    rows: List[List[str]] = []
+    for row_match in re.finditer(r"<tr\b[^>]*>([\s\S]*?)</tr>", text, flags=re.IGNORECASE):
+        cells = [
+            _clean_import_cell(cell_match.group(1))
+            for cell_match in re.finditer(r"<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>", row_match.group(1), flags=re.IGNORECASE)
+        ]
+        if cells:
+            rows.append(cells)
+    if not rows:
+        raise ValueError("El XLS no contiene tabla HTML")
+    header = rows[0]
+    for values in rows[1:]:
+        _ingest_afiliado_row(_row_from_header(header, values), items)
+
+
+def _ingest_xlsx(content: bytes, items: List[Dict[str, Any]]) -> None:
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise HTTPException(status_code=500, detail="openpyxl no instalado")
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    header = list(next(rows_iter, []))
+    for values in rows_iter:
+        _ingest_afiliado_row(_row_from_header(header, list(values)), items)
+
+
+def _ingest_xls(content: bytes, items: List[Dict[str, Any]]) -> None:
+    try:
+        import xlrd
+    except ImportError:
+        raise HTTPException(status_code=500, detail="xlrd no instalado para leer XLS antiguo")
+    book = xlrd.open_workbook(file_contents=content)
+    sheet = book.sheet_by_index(0)
+    if sheet.nrows < 1:
+        return
+    header = [_clean_import_cell(sheet.cell_value(0, c)) for c in range(sheet.ncols)]
+    for r in range(1, sheet.nrows):
+        values = []
+        for c in range(sheet.ncols):
+            cell = sheet.cell(r, c)
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                try:
+                    value = datetime(*xlrd.xldate_as_tuple(cell.value, book.datemode)).date().isoformat()
+                except Exception:
+                    value = cell.value
+            else:
+                value = cell.value
+            values.append(value)
+        _ingest_afiliado_row(_row_from_header(header, values), items)
 
 
 def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> None:
     def pick(*aliases: str) -> str:
         for a in aliases:
-            v = row.get(a.lower())
+            v = row.get(_normalize_import_key(a))
             if v:
                 return v.strip()
         return ""
 
     nombres    = pick("nombres", "nombre", "nombre_completo", "first_name")
     apellidos  = pick("apellidos", "apellido", "last_name")
+    if apellidos.strip() in {"-", "--"}:
+        apellidos = ""
     nombre_full = pick("nombre_completo")
     if nombres or apellidos:
         nombre = f"{nombres} {apellidos}".replace(" - ", " ").replace(" -", "").strip()
     else:
         nombre = nombre_full
+    nombre = re.sub(r"\s+", " ", nombre).strip(" -")
 
-    ced_raw = pick("cedula", "cédula", "documento", "dni", "identificacion", "id")
+    ced_raw = pick("cedula", "cédula", "documento", "dni", "identificacion")
     ced = clean_cedula(ced_raw)
+    if not ced:
+        ced = clean_cedula(pick("cc", "documento identidad", "numero documento", "numero_documento"))
     if not ced:
         return
     items.append({
         "cedula":    ced,
         "nombre":    nombre,
         "sede":      pick("sede", "institucion", "institución", "institucion_educativa"),
-        "municipio": pick("municipio", "ente", "ciudad", "ciudad_trabajo"),
+        "municipio": pick("municipio", "mun. cedula", "mun. cÃ©dula", "mun_cedula", "municipio cedula", "ciudad", "ciudad_trabajo"),
         "zona":      pick("zona", "mun. cedula", "mun. cédula", "mun_cedula"),
         "cargo":     pick("cargo", "rol"),
         "titulo":    pick("titulo", "título"),
@@ -688,6 +824,7 @@ def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> No
         "celular":   pick("celular", "telefono", "teléfono", "movil", "móvil"),
         "fecha_nac": pick("fecha_nac", "fecha nac.", "fecha_nacimiento", "nacimiento"),
     })
+    items[-1]["zona"] = pick("zona", "ente", "sector")
 
 
 @api.patch("/admin/afiliados/{cedula}")
