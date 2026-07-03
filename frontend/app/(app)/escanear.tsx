@@ -504,7 +504,7 @@ export default function EscanearScreen() {
               showToast("err", "IA sin resultado. Probando QR/DataMatrix, MRZ y barras...");
               const barcodeResult: OcrReadResult = options.skipBarcodeFallback || !imageBase64
                 ? { raw: "" }
-                : await readCameraBarcode(false, imageBase64, { preferMrz: false });
+                : await readCameraBarcode(false, imageBase64, { preferMrz: true });
               fallbackRaw = barcodeResult.raw;
               if (barcodeResult.serverParsed) inheritedServerParsed = barcodeResult.serverParsed;
             }
@@ -627,7 +627,7 @@ export default function EscanearScreen() {
     }
 
     showToast("err", "IA sin resultado. Intentando QR/DataMatrix, MRZ y barras...");
-    const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: false });
+    const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
     if (barcodeResult.raw) {
       await handleScan(barcodeResult.raw, {
         skipBarcodeFallback: true,

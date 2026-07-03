@@ -117,6 +117,7 @@ MRZ_DIGIT_FIXES = str.maketrans({
     "S": "5",
     "Z": "2",
 })
+MRZ_NAME_FILLER_OCR_CHARS = set("TSILKCF")
 
 # ─── BUG #4 FIX: Regex de etiqueta ampliado ──────────────────────────────────
 # Antes solo buscaba: NÚMERO, N°, CEDULA, CC
@@ -296,6 +297,74 @@ def _clean_mrz_name_token(value: str) -> str:
     return best
 
 
+def _is_mrz_filler_name_token(value: str) -> bool:
+    text = re.sub(r"[^A-Z]", "", (value or "").upper())
+    return bool(text and len(text) <= 8 and all(c in MRZ_NAME_FILLER_OCR_CHARS for c in text))
+
+
+def _clean_mrz_name_parts(parts: List[str]) -> List[str]:
+    cleaned = [_clean_mrz_name_token(p) for p in parts if p]
+    cleaned = [p for p in cleaned if p]
+    meaningful = [p for p in cleaned if not _is_mrz_filler_name_token(p)]
+    return meaningful if meaningful else cleaned
+
+
+def _td1_doc_check_ok(doc_field: str, check_digit: str) -> bool:
+    if not check_digit or not check_digit.isdigit():
+        return False
+    normalized = (doc_field or "").replace("<", "")
+    if not normalized:
+        return False
+    compact = normalized.lstrip("0") or normalized
+    return validate_mrz_field(compact, check_digit) or validate_mrz_field(normalized, check_digit)
+
+
+def _parse_td1_l1_fields(l1: str) -> Tuple[str, str, str, str]:
+    doc_field = _fix_mrz_digits(l1[5:14])
+    doc_check = _fix_mrz_digits(l1[14:15])
+    mun_code = _fix_mrz_digits(l1[15:17])
+    dep_code = _fix_mrz_digits(l1[17:20])
+
+    body = _fix_mrz_digits(l1[5:]).replace("<", "")
+    # Tesseract sometimes inserts an extra O/0 after ICCOL. Slide across the
+    # numeric body and recover the Colombian TD1 layout: 9 doc + check + 2 mun + 3 dep.
+    for start in range(0, max(1, len(body) - 14)):
+        chunk = body[start:start + 15]
+        if not re.fullmatch(r"\d{15}", chunk or ""):
+            continue
+        candidate_doc = chunk[:9]
+        candidate_check = chunk[9]
+        if _td1_doc_check_ok(candidate_doc, candidate_check):
+            return candidate_doc, candidate_check, chunk[10:12], chunk[12:15]
+    return doc_field, doc_check, mun_code, dep_code
+
+
+def _valid_mrz_nuip(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "").lstrip("0")
+    if not re.fullmatch(r"\d{5,11}", digits or ""):
+        return ""
+    if _is_date(digits) or _is_year(digits):
+        return ""
+    return digits
+
+
+def _extract_colombian_td1_nuip(l2: str) -> str:
+    # Colombian TD1 stores the real NUIP at line 2 positions 18-27.
+    # Position 28 is filler and position 29 is the final MRZ check digit.
+    primary = _valid_mrz_nuip(_fix_mrz_digits(l2[18:28]).replace("<", ""))
+    if primary:
+        return primary
+
+    for match in re.finditer(r"(?:COL|C0L|CO1|C01)([0-9OQDILBSZ<]{7,13})", (l2 or "").upper()):
+        tail = _fix_mrz_digits(match.group(1)).replace("<", "")
+        if len(tail) > 10:
+            tail = tail[:10]
+        candidate = _valid_mrz_nuip(tail)
+        if candidate:
+            return candidate
+    return ""
+
+
 def _candidate_mrz_lines(raw: str) -> List[str]:
     lines: List[str] = []
     cleaned_lines: List[str] = []
@@ -373,14 +442,8 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
         return out
 
     l1_numeric = l1[:5] + _fix_mrz_digits(l1[5:])
-    # TD1: posiciones 5-13 = 9 chars del numero, posicion 14 = check digit
-    # Para cedulas de 10 digitos, el decimo digito puede estar en pos 15
-    doc_field_raw = _fix_mrz_digits(l1[5:14])   # 9 chars
-    doc_check_raw = _fix_mrz_digits(l1[14:15])  # 1 char check digit
-    # Verificar si el numero desborda al campo opcional (pos 15) - cedulas 10 digitos
+    doc_field, doc_check, mun_code, dep_code = _parse_td1_l1_fields(l1)
     extra_char = _fix_mrz_digits(l1[15:16]) if len(l1) > 15 else ""
-    doc_field = doc_field_raw
-    doc_check = doc_check_raw
 
     # Intentar con regex primero (puede capturar numeros cortos directamente)
     doc_match = re.match(r"^(?:IDCOL|ICCOL)(\d{5,9})([0-9])", l1_numeric)
@@ -399,19 +462,15 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
                 doc_field = candidate10
                 doc_check = check10
             else:
-                doc_field = doc_field_raw
-                doc_check = doc_check_raw
+                doc_field, doc_check, mun_code, dep_code = _parse_td1_l1_fields(l1)
 
     cedula = doc_field.replace("<", "").lstrip("0")
 
-    # Colombia (ICCOL/IDCOL) pone el numero COMPLETO en el campo opcional de L2
-    # posiciones 18-28 de L2. Si ahi hay un numero mas largo, ese es el real.
-    l2_opcional = l2[18:29].replace("<", "").strip()
-    l2_opcional_fixed = _fix_mrz_digits(l2_opcional)
-    if (l2_opcional_fixed.isdigit()
-            and len(l2_opcional_fixed) > len(cedula)
-            and 7 <= len(l2_opcional_fixed) <= 11):
-        cedula = l2_opcional_fixed.lstrip("0") or l2_opcional_fixed
+    # Colombia (ICCOL/IDCOL) stores the real NUIP in line 2, not in the
+    # first-line internal document serial.
+    l2_nuip = _extract_colombian_td1_nuip(l2)
+    if l2_nuip and len(l2_nuip) >= len(cedula):
+        cedula = l2_nuip
     birth = _fix_mrz_digits(l2[0:6])
     birth_check = _fix_mrz_digits(l2[6])[:1]
     gender = l2[7]
@@ -422,15 +481,13 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
     name_line = l3.replace("0", "O").rstrip("<")
     if "<<" in name_line:
         last_block, first_block = name_line.split("<<", 1)
-        last_parts = [_clean_mrz_name_token(p) for p in last_block.split("<") if p]
-        first_parts = [_clean_mrz_name_token(p) for p in first_block.split("<") if p]
-        first_parts = [p for p in first_parts if p]
+        last_parts = _clean_mrz_name_parts(last_block.split("<"))
+        first_parts = _clean_mrz_name_parts(first_block.split("<"))
         out["primer_apellido"] = last_parts[0] if last_parts else ""
         out["segundo_apellido"] = " ".join(last_parts[1:])
         out["nombres"] = " ".join(first_parts)
     else:
-        name_parts = [_clean_mrz_name_token(p) for p in name_line.split("<") if p]
-        name_parts = [p for p in name_parts if p]
+        name_parts = _clean_mrz_name_parts(name_line.split("<"))
         if name_parts:
             out["primer_apellido"] = name_parts[0]
         if len(name_parts) > 1:
@@ -439,17 +496,23 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
             out["nombres"] = " ".join(name_parts[2:])
 
     doc_validation_field = doc_field.lstrip("0") or doc_field
-    doc_ok = validate_mrz_field(doc_validation_field, doc_check)
+    doc_ok = _td1_doc_check_ok(doc_field, doc_check)
     birth_ok = validate_mrz_field(birth, birth_check)
     expiry_ok = validate_mrz_field(expiry, expiry_check)
+    mrz_valid = (doc_ok or bool(l2_nuip)) and birth_ok and expiry_ok
 
     out.update({
         "cedula": cedula,
+        "nuip": l2_nuip or cedula,
+        "doc_number": doc_validation_field,
+        "doc_number_check_digit": doc_check,
+        "mun_code": mun_code if re.fullmatch(r"\d{2}", mun_code or "") else "",
+        "dep_code": dep_code if re.fullmatch(r"\d{3}", dep_code or "") else "",
         "genero": gender if gender in ("M", "F") else "",
         "fecha_nacimiento": _format_mrz_date(birth),
         "fecha_expiracion": _format_mrz_date(expiry, future=True),
         "nacionalidad": nationality,
-        "mrz_valido": doc_ok and birth_ok and expiry_ok,
+        "mrz_valido": mrz_valid,
         "raw_mrz": lines[:3],
     })
     return out
@@ -546,6 +609,11 @@ def _classic_pdf417_out(raw: Any) -> Dict[str, Any]:
         "fecha_nacimiento": "",
         "fecha_expiracion": "",
         "nacionalidad": "",
+        "nuip": "",
+        "doc_number": "",
+        "doc_number_check_digit": "",
+        "mun_code": "",
+        "dep_code": "",
         "tipo_sangre": "",
         "formato_detectado": "",
         "mrz_valido": False,

@@ -59,6 +59,8 @@ Reglas MRZ/ICCOL para reverso:
 - Si ves algo como "ICCOL000000012", NO devuelvas "12" ni "000000012".
 - En cedula colombiana moderna, el NUIP real suele estar en la segunda linea despues de "COL".
 - Ejemplo: "8808213F3101300COL1234567890<9" => cedula correcta "1234567890".
+- El campo NUIP de la segunda linea son los 10 caracteres despues de COL; ignora el relleno "<" y el digito final de control MRZ.
+- La primera linea ICCOL contiene doc_number interno, municipio y departamento; NO reemplaza al NUIP real.
 - Quita caracteres "<" y no incluyas el ultimo digito verificador MRZ.
 - La tercera linea MRZ trae apellidos y nombres: apellidos antes de "<<", nombres despues de "<<".
 

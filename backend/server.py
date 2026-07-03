@@ -1390,7 +1390,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
             raise HTTPException(status_code=400, detail="No se proporcionó texto de barras ni imagen Base64")
             
         print("\n[BACKEND-📸] Procesando por respaldo de imagen...")
-        resultado_img = decode_identity_document_from_base64(image_base64)
+        resultado_img = decode_identity_document_from_base64(image_base64, prefer_mrz=True)
 
         if not resultado_img.get("ok"):
             ocr_result = await ocr_from_base64_async(image_base64, force_gemini=False)

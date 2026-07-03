@@ -164,3 +164,32 @@ def test_parse_iccol_mrz_with_split_name_lines_from_ocr():
     assert parsed["cedula"] == "1234567890"
     assert parsed["primer_apellido"] == "WALTEROS"
     assert parsed["nombres"] == "AURA"
+
+
+def test_parse_iccol_mrz_uses_only_line2_nuip_not_final_check_digit():
+    raw = "\n".join([
+        "ICCOL000000012305001<<<<<<<<<<",
+        "8808213F3101300COL12345678909",
+        "WALTEROS<<LAURA<<<<<<<<<<<<",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["nuip"] == "1234567890"
+    assert parsed["doc_number"] == "12"
+
+
+def test_parse_iccol_mrz_cleans_trailing_ocr_filler_from_names():
+    raw = "\n".join([
+        "ICCOLOO00000012305001<<<<<<<<<<",
+        "0403151F3203190C0L1234567890<0",
+        "WALTEROS<<LAURA<<<<<KKK<K<",
+    ])
+
+    parsed = parse_mrz_from_text(raw)
+
+    assert parsed["cedula"] == "1234567890"
+    assert parsed["nombres"] == "LAURA"
+    assert parsed["primer_apellido"] == "WALTEROS"
+    assert parsed["mrz_valido"] is True
