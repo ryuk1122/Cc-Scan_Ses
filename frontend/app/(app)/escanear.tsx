@@ -32,7 +32,6 @@ import PrinterSelector from "@/src/components/PrinterSelector";
 
 const PILL_TIMEOUT = 2500;
 const RAW_SCAN_COOLDOWN_MS = 900;
-const AUTO_IMAGE_FALLBACK_COOLDOWN_MS = 3500;
 const SCANNER_REARM_DELAY_MS = 450;
 const ABSOLUTE_FILL = { position: "absolute" as const, top: 0, right: 0, bottom: 0, left: 0 };
 const COLOMBIAN_DASH_PAYLOAD_RE = /(?:^|[^A-Z0-9])([A-Z])-\d{5,8}-\d{5,10}-([MF])-(\d{5,11})-((?:19|20)\d{6})(?:[^0-9]|$)/i;
@@ -307,7 +306,6 @@ export default function EscanearScreen() {
   const barcodeLoadingRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scannerRearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastImageFallbackAtRef = useRef(0);
   const flashAnim = useRef(new Animated.Value(0)).current;
   const scanLineAnim = useRef(new Animated.Value(0)).current;
   const cameraRef = useRef<any>(null);
@@ -511,7 +509,6 @@ export default function EscanearScreen() {
       try {
         let rawToUse = normalizeQrCedulaPayload(raw);
         let inheritedServerParsed = options.serverParsed;
-        let imageFallbackTried = false;
         const hasServerParsed = () => !!inheritedServerParsed && Object.keys(inheritedServerParsed).length > 0;
         const canUseServerParsed = () => hasServerParsed() && !!cleanCedulaNumber(inheritedServerParsed?.cedula);
         const buildParsed = (): ParsedCedulaResult => canUseServerParsed()
@@ -530,44 +527,7 @@ export default function EscanearScreen() {
               raw: rawToUse,
             }
           : parsePdf417(rawToUse);
-        const tryImageFallback = async (startMessage: string): Promise<boolean> => {
-          if (mode !== "camera" || options.skipBarcodeFallback || imageFallbackTried) return false;
-          const now = Date.now();
-          if (now - lastImageFallbackAtRef.current < AUTO_IMAGE_FALLBACK_COOLDOWN_MS) return false;
-          imageFallbackTried = true;
-          lastImageFallbackAtRef.current = now;
-
-          const imageBase64 = await captureCameraBase64(0.92);
-          if (!imageBase64) return false;
-
-          showToast("err", startMessage);
-          const iaResult = await readCameraWithGemini(imageBase64);
-          const iaCedula = cleanCedulaNumber(iaResult?.cedula);
-          if (iaCedula) {
-            rawToUse = iaCedula;
-            inheritedServerParsed = iaResult || undefined;
-            return true;
-          }
-
-          showToast("err", "IA sin resultado. Probando QR/DataMatrix, MRZ y barras...");
-          const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
-          if (barcodeResult.raw) {
-            rawToUse = normalizeQrCedulaPayload(barcodeResult.raw);
-            if (barcodeResult.serverParsed) inheritedServerParsed = barcodeResult.serverParsed;
-            return true;
-          }
-
-          showToast("err", "MRZ/QR sin resultado. Intentando OCR...");
-          const ocrResult = await readCameraWithOcr(imageBase64);
-          if (ocrResult.raw) {
-            rawToUse = normalizeQrCedulaPayload(ocrResult.raw);
-            if (ocrResult.serverParsed) inheritedServerParsed = ocrResult.serverParsed;
-            return true;
-          }
-
-          return false;
-        };
-
+        const tryImageFallback = async (_startMessage: string): Promise<boolean> => false;
         if (!canUseServerParsed() && !isReliableBarcode(rawToUse, mode)) {
           if (mode === "camera") {
             const recovered = await tryImageFallback("Codigo incompleto. Intentando con IA...");
@@ -814,7 +774,7 @@ export default function EscanearScreen() {
   barcodeScannerSettings={{
     barcodeTypes: ["pdf417", "qr", "datamatrix"],
   }}
-  onBarcodeScanned={scannerEnabled ? ({ raw, data, type }) => {
+  onBarcodeScanned={scannerEnabled ? ({ raw, data }) => {
     const payload = scannedPayload(raw, data);
     if (!payload) return;
     const normalized = normalizeQrCedulaPayload(payload);
@@ -827,13 +787,9 @@ export default function EscanearScreen() {
       return;
     }
     lastRawScanRef.current = { value: normalized, at: now };
-    const reliable = isReliableBarcode(normalized, mode);
-    const nativeType = String(type || "").toLowerCase();
-    const isNative2d = nativeType.includes("qr") || nativeType.includes("matrix") || nativeType.includes("aztec");
-    const isNativePdf417 = nativeType.includes("pdf") || nativeType.includes("417");
-    if (!reliable && !isNative2d && !isNativePdf417) return;
     const hasDirectCedula = !!extractCedulaFromCameraPayload(normalized);
-    void handleScan(normalized, { skipBarcodeFallback: hasDirectCedula });
+    if (!hasDirectCedula) return;
+    void handleScan(normalized, { skipBarcodeFallback: true });
               } : undefined}>
               <View style={styles.reticleOverlay} pointerEvents="none">
                 <View
