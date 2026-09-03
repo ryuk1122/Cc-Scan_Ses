@@ -536,7 +536,12 @@ async def get_afiliado(cedula: str, current=Depends(get_current_user)):
 
 
 @api.get("/admin/afiliados")
-async def list_afiliados(q: str = "", limit: int = 50, skip: int = 0, current=Depends(require_admin)):
+async def list_afiliados(
+    q: str = "",
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    current=Depends(require_admin),
+):
     query: Dict[str, Any] = {}
     qs = q.strip()
     if qs:
@@ -545,7 +550,7 @@ async def list_afiliados(q: str = "", limit: int = 50, skip: int = 0, current=De
         else:
             query = {"nombre": {"$regex": qs, "$options": "i"}}
     total = await db.afiliados.count_documents(query)
-    items = await db.afiliados.find(query, {"_id": 0}).sort("nombre", 1).skip(skip).limit(min(limit, 200)).to_list(200)
+    items = await db.afiliados.find(query, {"_id": 0}).sort("nombre", 1).skip(skip).limit(limit).to_list(limit)
     return {"total": total, "items": items}
 
 
@@ -733,6 +738,13 @@ def _clean_import_cell(value: Any) -> str:
         return ""
     if isinstance(value, datetime):
         return value.date().isoformat()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value:
+            return ""
+        if value.is_integer():
+            return str(int(value))
     text = str(value)
     text = text.replace("\x00", "").replace("\ufeff", "").replace("\ufffd", "")
     text = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
@@ -769,14 +781,61 @@ def _row_from_header(header: List[Any], values: List[Any]) -> Dict[str, str]:
     return row
 
 
+def _header_score(header: List[Any]) -> int:
+    keys = {_normalize_import_key(key) for key in header if _normalize_import_key(key)}
+    cedula_keys = {
+        "cedula", "cc", "documento", "dni", "identificacion", "identification",
+        "documento identidad", "numero documento", "numero de documento",
+        "no documento", "nro documento", "num documento", "identificacion personal",
+        "numero identificacion", "numero de identificacion", "no identificacion",
+        "nro identificacion", "cedula ciudadania", "cedula de ciudadania",
+        "numero cedula", "numero de cedula", "no cedula", "nro cedula",
+        "num cedula", "documento de identidad", "numero doc", "num doc",
+        "nro doc", "no doc", "identificacion docente",
+    }
+    name_keys = {
+        "nombre", "nombres", "apellidos", "apellido", "nombre completo",
+        "nombres apellidos", "nombres y apellidos", "apellidos nombres",
+        "apellidos y nombres", "docente", "maestro", "funcionario",
+        "empleado", "persona", "beneficiario",
+    }
+    return sum(3 for key in keys if key in cedula_keys) + sum(1 for key in keys if key in name_keys)
+
+
+def _detect_csv_delimiter(lines: List[str]) -> str:
+    sample = "\n".join(lines[:10])
+    try:
+        dialect = csv_lib.Sniffer().sniff(sample, delimiters=";,\t|")
+        return dialect.delimiter
+    except Exception:
+        candidates = [";", ",", "\t", "|"]
+        return max(candidates, key=lambda d: sum(line.count(d) for line in lines[:10]))
+
+
+def _find_header_index(rows: List[List[Any]]) -> int:
+    best_idx = 0
+    best_score = -1
+    for idx, row in enumerate(rows[:25]):
+        score = _header_score(row)
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+    return best_idx
+
+
 def _ingest_csv(content: bytes, items: List[Dict[str, Any]]) -> None:
     text = _decode_import_text(content)
-    sample = text.splitlines()[0] if text else ""
-    delim = ";" if sample.count(";") > sample.count(",") else ","
-    reader = csv_lib.DictReader(io.StringIO(text), delimiter=delim)
-    for raw_row in reader:
-        row = {_normalize_import_key(k): _clean_import_cell(v) for k, v in raw_row.items() if k}
-        _ingest_afiliado_row(row, items)
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return
+    delim = _detect_csv_delimiter(lines)
+    rows = list(csv_lib.reader(io.StringIO("\n".join(lines)), delimiter=delim))
+    if not rows:
+        return
+    header_idx = _find_header_index(rows)
+    header = rows[header_idx]
+    for values in rows[header_idx + 1:]:
+        _ingest_afiliado_row(_row_from_header(header, values), items)
 
 
 def _ingest_html_table(content: bytes, items: List[Dict[str, Any]]) -> None:
@@ -791,8 +850,9 @@ def _ingest_html_table(content: bytes, items: List[Dict[str, Any]]) -> None:
             rows.append(cells)
     if not rows:
         raise ValueError("El XLS no contiene tabla HTML")
-    header = rows[0]
-    for values in rows[1:]:
+    header_idx = _find_header_index(rows)
+    header = rows[header_idx]
+    for values in rows[header_idx + 1:]:
         _ingest_afiliado_row(_row_from_header(header, values), items)
 
 
@@ -803,9 +863,12 @@ def _ingest_xlsx(content: bytes, items: List[Dict[str, Any]]) -> None:
         raise HTTPException(status_code=500, detail="openpyxl no instalado")
     wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
     ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
-    header = list(next(rows_iter, []))
-    for values in rows_iter:
+    rows = [list(row) for row in ws.iter_rows(values_only=True) if any(_clean_import_cell(cell) for cell in row)]
+    if not rows:
+        return
+    header_idx = _find_header_index(rows)
+    header = rows[header_idx]
+    for values in rows[header_idx + 1:]:
         _ingest_afiliado_row(_row_from_header(header, list(values)), items)
 
 
@@ -818,8 +881,8 @@ def _ingest_xls(content: bytes, items: List[Dict[str, Any]]) -> None:
     sheet = book.sheet_by_index(0)
     if sheet.nrows < 1:
         return
-    header = [_clean_import_cell(sheet.cell_value(0, c)) for c in range(sheet.ncols)]
-    for r in range(1, sheet.nrows):
+    rows: List[List[Any]] = []
+    for r in range(sheet.nrows):
         values = []
         for c in range(sheet.ncols):
             cell = sheet.cell(r, c)
@@ -831,6 +894,13 @@ def _ingest_xls(content: bytes, items: List[Dict[str, Any]]) -> None:
             else:
                 value = cell.value
             values.append(value)
+        if any(_clean_import_cell(value) for value in values):
+            rows.append(values)
+    if not rows:
+        return
+    header_idx = _find_header_index(rows)
+    header = rows[header_idx]
+    for values in rows[header_idx + 1:]:
         _ingest_afiliado_row(_row_from_header(header, values), items)
 
 
@@ -842,36 +912,59 @@ def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> No
                 return v.strip()
         return ""
 
-    nombres    = pick("nombres", "nombre", "nombre_completo", "first_name")
-    apellidos  = pick("apellidos", "apellido", "last_name")
+    nombres    = pick(
+        "nombres", "nombre", "nombre_completo", "nombre completo", "nombres y apellidos",
+        "apellidos y nombres", "docente", "maestro", "funcionario", "empleado",
+        "persona", "beneficiario", "first_name",
+    )
+    apellidos  = pick("apellidos", "apellido", "primer apellido", "segundo apellido", "last_name")
     if apellidos.strip() in {"-", "--"}:
         apellidos = ""
-    nombre_full = pick("nombre_completo")
+    nombre_full = pick("nombre_completo", "nombre completo", "nombres y apellidos", "apellidos y nombres", "docente", "maestro")
     if nombres or apellidos:
         nombre = f"{nombres} {apellidos}".replace(" - ", " ").replace(" -", "").strip()
     else:
         nombre = nombre_full
     nombre = re.sub(r"\s+", " ", nombre).strip(" -")
 
-    ced_raw = pick("cedula", "cédula", "documento", "dni", "identificacion")
+    ced_raw = pick(
+        "cedula", "cédula", "cc", "c.c.", "documento", "dni", "identificacion",
+        "identificación", "documento identidad", "documento de identidad",
+        "numero documento", "numero de documento", "número de documento",
+        "no documento", "nro documento", "num documento", "numero doc",
+        "no doc", "nro doc", "num doc", "numero cedula", "numero de cedula",
+        "número de cédula", "no cedula", "nro cedula", "num cedula",
+        "cedula ciudadania", "cedula de ciudadania", "identificacion docente",
+    )
     ced = clean_cedula(ced_raw)
     if not ced:
-        ced = clean_cedula(pick("cc", "documento identidad", "numero documento", "numero_documento"))
+        ced = clean_cedula(pick("numero_documento", "id", "identification_number"))
+    if not ced:
+        for value in row.values():
+            ced = clean_cedula(value)
+            if ced:
+                break
     if not ced:
         return
+    if not nombre:
+        for value in row.values():
+            candidate = _clean_import_cell(value)
+            if candidate and clean_cedula(candidate) != ced and re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", candidate):
+                nombre = candidate
+                break
     items.append({
         "cedula":    ced,
         "nombre":    nombre,
-        "sede":      pick("sede", "institucion", "institución", "institucion_educativa"),
-        "municipio": pick("municipio", "mun. cedula", "mun. cÃ©dula", "mun_cedula", "municipio cedula", "ciudad", "ciudad_trabajo"),
-        "zona":      pick("zona", "mun. cedula", "mun. cédula", "mun_cedula"),
-        "cargo":     pick("cargo", "rol"),
-        "titulo":    pick("titulo", "título"),
-        "email":     pick("email", "correo"),
-        "celular":   pick("celular", "telefono", "teléfono", "movil", "móvil"),
-        "fecha_nac": pick("fecha_nac", "fecha nac.", "fecha_nacimiento", "nacimiento"),
+        "sede":      pick("sede", "institucion", "institución", "institucion_educativa", "institucion educativa", "establecimiento", "establecimiento educativo", "colegio", "ie"),
+        "municipio": pick("municipio", "municipio sede", "mun. cedula", "mun. cédula", "mun_cedula", "municipio cedula", "ciudad", "ciudad_trabajo", "ciudad trabajo"),
+        "zona":      pick("zona", "zona educativa", "region", "región"),
+        "cargo":     pick("cargo", "rol", "perfil", "tipo cargo", "tipo de cargo"),
+        "titulo":    pick("titulo", "título", "grado", "nivel"),
+        "email":     pick("email", "correo", "correo electronico", "correo electrónico", "e mail"),
+        "celular":   pick("celular", "telefono", "teléfono", "movil", "móvil", "whatsapp", "contacto"),
+        "fecha_nac": pick("fecha_nac", "fecha nac.", "fecha_nacimiento", "fecha nacimiento", "nacimiento", "fecha de nacimiento"),
     })
-    items[-1]["zona"] = pick("zona", "ente", "sector")
+    items[-1]["zona"] = pick("zona", "zona educativa", "region", "región", "ente", "sector")
 
 
 @api.patch("/admin/afiliados/{cedula}")
@@ -1023,9 +1116,20 @@ async def estado_evento(evento_id: str, current=Depends(get_current_user)):
 
 
 @api.get("/eventos/{evento_id}/registros")
-async def listar_registros(evento_id: str, current=Depends(get_current_user), limit: int = 1000):
-    docs = await db.registros.find({"evento_id": evento_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+async def listar_registros(
+    evento_id: str,
+    current=Depends(get_current_user),
+    limit: int = Query(500, ge=1, le=1000),
+    skip: int = Query(0, ge=0),
+):
+    docs = await db.registros.find({"evento_id": evento_id}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
     return docs
+
+
+@api.get("/eventos/{evento_id}/cedulas")
+async def listar_cedulas_evento(evento_id: str, current=Depends(get_current_user)):
+    cedulas = await db.registros.distinct("cedula", {"evento_id": evento_id})
+    return [str(cedula) for cedula in cedulas if cedula]
 
 
 @api.get("/eventos/{evento_id}/auditoria")
