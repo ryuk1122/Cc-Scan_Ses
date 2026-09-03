@@ -69,11 +69,19 @@ TOKEN_HOURS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_HOURS", "12"))
 CORS_ORIGINS = parse_csv_env("CORS_ORIGINS", "*")
 BCRYPT_ROUNDS = int(os.environ.get("BCRYPT_ROUNDS", "10"))
 ALLOW_WIPE_AFILIADOS = parse_bool_env("ALLOW_WIPE_AFILIADOS", False)
+MONGO_CONNECT_TIMEOUT_MS = int(os.environ.get("MONGO_CONNECT_TIMEOUT_MS", "5000"))
+MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
+STARTUP_SETUP_MAX_ATTEMPTS = int(os.environ.get("STARTUP_SETUP_MAX_ATTEMPTS", "6"))
+STARTUP_SETUP_RETRY_SECONDS = float(os.environ.get("STARTUP_SETUP_RETRY_SECONDS", "5"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cedulascan")
 
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    connectTimeoutMS=MONGO_CONNECT_TIMEOUT_MS,
+    serverSelectionTimeoutMS=MONGO_SERVER_SELECTION_TIMEOUT_MS,
+)
 db     = client[DB_NAME]
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=BCRYPT_ROUNDS)
 
@@ -308,6 +316,13 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+startup_state: Dict[str, Any] = {
+    "database_ready": False,
+    "setup_attempts": 0,
+    "setup_error": "",
+    "setup_completed_at": "",
+}
+
 
 # ---------- Afiliados seed ----------
 async def _seed_afiliados_if_empty():
@@ -404,11 +419,43 @@ async def _setup() -> None:
     asyncio.create_task(_seed_afiliados_if_empty())
 
 
+async def _setup_until_ready() -> None:
+    for attempt in range(1, STARTUP_SETUP_MAX_ATTEMPTS + 1):
+        startup_state["setup_attempts"] = attempt
+        try:
+            await _setup()
+        except Exception as exc:
+            startup_state["database_ready"] = False
+            startup_state["setup_error"] = str(exc)
+            logger.exception(
+                "Error preparando MongoDB (intento %s/%s)",
+                attempt,
+                STARTUP_SETUP_MAX_ATTEMPTS,
+            )
+            if attempt < STARTUP_SETUP_MAX_ATTEMPTS:
+                await asyncio.sleep(STARTUP_SETUP_RETRY_SECONDS)
+            continue
+
+        startup_state["database_ready"] = True
+        startup_state["setup_error"] = ""
+        startup_state["setup_completed_at"] = now_iso()
+        return
+
+
 # Correccion: lifespan reemplaza los deprecados @app.on_event
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await _setup()
-    yield
+    setup_task = asyncio.create_task(_setup_until_ready())
+    app.state.setup_task = setup_task
+    try:
+        yield
+    finally:
+        if not setup_task.done():
+            setup_task.cancel()
+            try:
+                await setup_task
+            except asyncio.CancelledError:
+                pass
     client.close()
     logger.info("Conexion MongoDB cerrada.")
 
@@ -1329,10 +1376,42 @@ async def root():
     return {"service": "CedulaScan Pro", "status": "ok", "version": "2.1.0"}
 
 
-@api.get("/health/dependencies")
-async def health_dependencies():
+@api.get("/health")
+async def health():
     return {
         "ok": True,
+        "service": "CedulaScan Pro",
+        "status": "live",
+        "version": "2.1.0",
+        "database_ready": startup_state["database_ready"],
+    }
+
+
+async def mongo_dependency_status() -> Dict[str, Any]:
+    try:
+        await db.command("ping")
+        return {
+            "ok": True,
+            "configured": True,
+            "database": DB_NAME,
+            "setup": startup_state,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "configured": True,
+            "database": DB_NAME,
+            "error": str(exc)[:300],
+            "setup": startup_state,
+        }
+
+
+@api.get("/health/dependencies")
+async def health_dependencies():
+    mongo = await mongo_dependency_status()
+    return {
+        "ok": mongo["ok"],
+        "mongo": mongo,
         "ocr": ocr_dependency_status(),
         "barcode": barcode_dependency_status(),
         "gemini": gemini_dependency_status(),
