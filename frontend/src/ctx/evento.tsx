@@ -39,6 +39,7 @@ type EventoCtxValue = {
   eventoId: string | null;
   eventoNombre: string;
   registros: Registro[];
+  totalRegistros: number;
   cedulasSet: Set<string>;
   wsStatus: "idle" | "connecting" | "online" | "offline";
   activos: number;
@@ -60,6 +61,7 @@ const EventoCtx = createContext<EventoCtxValue | undefined>(undefined);
 const QUEUE_KEY = "cs_offline_queue";
 const SELECTED_EVENT_KEY = "cs_selected_event";
 const REGISTROS_CACHE_PREFIX = "cs_registros_";
+const REGISTROS_RECENT_LIMIT = 200;
 
 type StoredEvento = {
   id: string;
@@ -105,6 +107,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const [eventoId, setEventoId] = useState<string | null>(null);
   const [eventoNombre, setEventoNombre] = useState("");
   const [registros, setRegistros] = useState<Registro[]>([]);
+  const [totalRegistros, setTotalRegistros] = useState(0);
   const cedulasSetRef = useRef<Set<string>>(new Set());
   const [, forceRender] = useState(0);
   const [wsStatus, setWsStatus] = useState<EventoCtxValue["wsStatus"]>("idle");
@@ -137,6 +140,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       setEventoNombre(saved.nombre || "");
       cedulasSetRef.current = new Set(cached.map((r) => r.cedula));
       setRegistros(cached);
+      setTotalRegistros(cached.length);
       forceRender((n) => n + 1);
     })();
     return () => {
@@ -144,26 +148,33 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const addRegistro = useCallback((r: Registro) => {
+  const addRegistro = useCallback((r: Registro, countAsNew = true) => {
     if (cedulasSetRef.current.has(r.cedula)) return;
     cedulasSetRef.current.add(r.cedula);
     setRegistros((prev) => {
-      const next = [r, ...prev];
+      const next = [r, ...prev].slice(0, REGISTROS_RECENT_LIMIT);
       void cacheRegistros(r.evento_id, next);
       return next;
     });
+    if (countAsNew) {
+      setTotalRegistros((prev) => prev + 1);
+    }
     forceRender((n) => n + 1);
   }, [cacheRegistros]);
 
   const refreshRegistros = useCallback(async () => {
     if (!eventoId) return;
     try {
-      const list = await api.registros(eventoId);
-      const set = new Set<string>(list.map((r) => r.cedula));
+      const [list, est, cedulas] = await Promise.all([
+        api.registros(eventoId, REGISTROS_RECENT_LIMIT, 0),
+        api.estado(eventoId),
+        api.registroCedulas(eventoId),
+      ]);
+      const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
       cedulasSetRef.current = set;
       setRegistros(list as Registro[]);
       await cacheRegistros(eventoId, list as Registro[]);
-      const est = await api.estado(eventoId);
+      setTotalRegistros(Number(est.total ?? list.length));
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
@@ -324,14 +335,19 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     setActivos(0);
     setLastDuplicate(null);
     setLastSuccess(null);
+    setTotalRegistros(0);
     // Load initial
     try {
-      const list = await api.registros(id);
-      const set = new Set<string>(list.map((r) => r.cedula));
+      const [list, est, cedulas] = await Promise.all([
+        api.registros(id, REGISTROS_RECENT_LIMIT, 0),
+        api.estado(id),
+        api.registroCedulas(id),
+      ]);
+      const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
       cedulasSetRef.current = set;
       setRegistros(list as Registro[]);
       await cacheRegistros(id, list as Registro[]);
-      const est = await api.estado(id);
+      setTotalRegistros(Number(est.total ?? list.length));
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
@@ -343,6 +359,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     setEventoId(null);
     setEventoNombre("");
     setRegistros([]);
+    setTotalRegistros(0);
     cedulasSetRef.current = new Set();
     void storage.removeItem(SELECTED_EVENT_KEY);
     try {
@@ -409,7 +426,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           // Duplicado servidor
           const existing = err?.detail?.registro_existente;
           if (existing) {
-            addRegistro(existing as Registro);
+            addRegistro(existing as Registro, false);
           } else {
             cedulasSetRef.current.add(cedula);
           }
@@ -476,6 +493,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         eventoId,
         eventoNombre,
         registros,
+        totalRegistros,
         cedulasSet: cedulasSetRef.current,
         wsStatus,
         activos,
