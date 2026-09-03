@@ -90,6 +90,9 @@ function CountRow({ item, max }: { item: MetricItem; max: number }) {
   );
 }
 
+const AF_PAGE_SIZE = 100;
+const REG_PAGE_SIZE = 200;
+
 export default function AdminScreen() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
@@ -103,12 +106,20 @@ export default function AdminScreen() {
   const [afItems, setAfItems] = useState<any[]>([]);
   const [afTotal, setAfTotal] = useState(0);
   const [afLoading, setAfLoading] = useState(false);
+  const [afLoadingMore, setAfLoadingMore] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [importBusy, setImportBusy] = useState(false);
 
   // Registros
-  const { eventoId, eventoNombre, refreshRegistros, registros } = useEvento();
+  const { eventoId, eventoNombre, refreshRegistros, totalRegistros } = useEvento();
+  const [regItems, setRegItems] = useState<any[]>([]);
+  const [regTotal, setRegTotal] = useState(0);
+  const [regLoading, setRegLoading] = useState(false);
+  const [regLoadingMore, setRegLoadingMore] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const registrosTotal = metrics?.evento_actual.registros ?? (regTotal || totalRegistros);
+  const afHasMore = afItems.length < afTotal;
+  const regHasMore = regItems.length < registrosTotal;
 
   const loadMetrics = useCallback(async () => {
     if (!isAdmin) return;
@@ -123,19 +134,83 @@ export default function AdminScreen() {
     }
   }, [eventoId, isAdmin]);
 
-  const loadAfiliados = useCallback(async () => {
+  const loadAfiliadosPage = useCallback(async (skip = 0) => {
     if (!isAdmin) return;
-    setAfLoading(true);
+    const append = skip > 0;
+    if (append) setAfLoadingMore(true);
+    else setAfLoading(true);
     try {
-      const r = await api.listAfiliados(afQuery, 100, 0);
-      setAfItems(r.items);
+      const r = await api.listAfiliados(afQuery, AF_PAGE_SIZE, skip);
+      if (append) {
+        setAfItems((prev) => {
+          const seen = new Set(prev.map((it) => it.cedula));
+          return [...prev, ...r.items.filter((it) => !seen.has(it.cedula))];
+        });
+      } else {
+        setAfItems(r.items);
+      }
       setAfTotal(r.total);
     } catch (e: any) {
       Alert.alert("Error", errorMessage(e, "No se pudo cargar"));
     } finally {
-      setAfLoading(false);
+      if (append) setAfLoadingMore(false);
+      else setAfLoading(false);
     }
   }, [afQuery, isAdmin]);
+
+  const loadAfiliados = useCallback(() => {
+    void loadAfiliadosPage(0);
+  }, [loadAfiliadosPage]);
+
+  const loadMoreAfiliados = useCallback(() => {
+    if (afLoading || afLoadingMore || !afHasMore) return;
+    void loadAfiliadosPage(afItems.length);
+  }, [afHasMore, afItems.length, afLoading, afLoadingMore, loadAfiliadosPage]);
+
+  const loadRegistrosPage = useCallback(async (skip = 0) => {
+    if (!isAdmin || !eventoId) {
+      setRegItems([]);
+      setRegTotal(0);
+      return;
+    }
+    const append = skip > 0;
+    if (append) setRegLoadingMore(true);
+    else setRegLoading(true);
+    try {
+      const [items, estado] = await Promise.all([
+        api.registros(eventoId, REG_PAGE_SIZE, skip),
+        api.estado(eventoId),
+      ]);
+      const total = Number(estado?.total ?? skip + items.length);
+      setRegTotal(total);
+      setMetrics((current) => current ? {
+        ...current,
+        evento_actual: { ...current.evento_actual, registros: total },
+      } : current);
+      if (append) {
+        setRegItems((prev) => {
+          const seen = new Set(prev.map((it) => it.id));
+          return [...prev, ...items.filter((it) => !seen.has(it.id))];
+        });
+      } else {
+        setRegItems(items);
+      }
+    } catch (e: any) {
+      Alert.alert("Error", errorMessage(e, "No se pudieron cargar los registros"));
+    } finally {
+      if (append) setRegLoadingMore(false);
+      else setRegLoading(false);
+    }
+  }, [eventoId, isAdmin]);
+
+  const loadRegistros = useCallback(() => {
+    void loadRegistrosPage(0);
+  }, [loadRegistrosPage]);
+
+  const loadMoreRegistros = useCallback(() => {
+    if (regLoading || regLoadingMore || !regHasMore) return;
+    void loadRegistrosPage(regItems.length);
+  }, [loadRegistrosPage, regHasMore, regItems.length, regLoading, regLoadingMore]);
 
   useEffect(() => {
     if (tab === "afiliados") {
@@ -143,6 +218,12 @@ export default function AdminScreen() {
       return () => clearTimeout(t);
     }
   }, [tab, loadAfiliados]);
+
+  useEffect(() => {
+    if (tab === "registros") {
+      loadRegistros();
+    }
+  }, [tab, loadRegistros]);
 
   useEffect(() => {
     if (tab !== "panel") return;
@@ -237,6 +318,8 @@ export default function AdminScreen() {
           try {
             await api.deleteRegistro(eventoId, id);
             await refreshRegistros();
+            loadRegistros();
+            void loadMetrics();
           } catch (e: any) { Alert.alert("Error", errorMessage(e)); }
         },
       },
@@ -250,7 +333,7 @@ export default function AdminScreen() {
     }
     Alert.alert(
       "Limpiar todos los registros",
-      `Vas a borrar TODOS los ${registros.length} registros del evento "${eventoNombre}". Esta acción NO se puede deshacer.`,
+      `Vas a borrar TODOS los ${registrosTotal} registros del evento "${eventoNombre}". Esta acción NO se puede deshacer.`,
       [
         { text: "Cancelar", style: "cancel" },
         {
@@ -260,6 +343,20 @@ export default function AdminScreen() {
             try {
               const r = await api.clearEventoRegistros(eventoId);
               Alert.alert("Listo", `${r.registros_borrados} registros borrados`);
+              setRegItems([]);
+              setRegTotal(0);
+              setMetrics((current) => current ? {
+                ...current,
+                evento_actual: {
+                  ...current.evento_actual,
+                  registros: 0,
+                  hoy: 0,
+                  afiliados: 0,
+                  no_afiliados: 0,
+                  duplicados: 0,
+                },
+                recientes: [],
+              } : current);
               await refreshRegistros();
             } catch (e: any) {
               Alert.alert("Error", errorMessage(e));
@@ -337,7 +434,7 @@ export default function AdminScreen() {
         >
           <Ionicons name="list" size={16} color={tab === "registros" ? "#fff" : theme.textSecondary} />
           <Text style={[styles.tabText, tab === "registros" && { color: "#fff" }]}>Evento</Text>
-          <Text style={[styles.tabBadge, tab === "registros" && { color: "#fff" }]}>{registros.length}</Text>
+          <Text style={[styles.tabBadge, tab === "registros" && { color: "#fff" }]}>{registrosTotal}</Text>
         </TouchableOpacity>
       </View>
 
@@ -372,7 +469,7 @@ export default function AdminScreen() {
                     <Ionicons name="scan" size={18} color={theme.info} />
                     <Text style={styles.kpiLabel}>Escaneos evento</Text>
                   </View>
-                  <Text style={styles.kpiValue}>{fmt(metrics?.evento_actual.registros ?? registros.length)}</Text>
+                  <Text style={styles.kpiValue}>{fmt(registrosTotal)}</Text>
                   <Text style={styles.kpiFoot}>{fmt(metrics?.evento_actual.hoy)} hoy</Text>
                 </View>
                 <View style={styles.kpiCard}>
@@ -491,7 +588,18 @@ export default function AdminScreen() {
               data={afItems}
               keyExtractor={(it) => it.cedula}
               contentContainerStyle={{ padding: 16, paddingBottom: 40, gap: 8 }}
+              onEndReached={loadMoreAfiliados}
+              onEndReachedThreshold={0.35}
               ListEmptyComponent={<Text style={styles.empty}>Sin resultados.</Text>}
+              ListFooterComponent={
+                afHasMore ? (
+                  <TouchableOpacity style={styles.loadMoreBtn} onPress={loadMoreAfiliados} disabled={afLoadingMore}>
+                    {afLoadingMore ? <ActivityIndicator color="#fff" /> : <Text style={styles.loadMoreText}>Cargar más</Text>}
+                  </TouchableOpacity>
+                ) : afItems.length ? (
+                  <Text style={styles.listCountText}>{fmt(afItems.length)} de {fmt(afTotal)} docentes</Text>
+                ) : null
+              }
               renderItem={({ item }) => (
                 <View style={styles.afRow}>
                   <View style={{ flex: 1 }}>
@@ -515,6 +623,7 @@ export default function AdminScreen() {
           <View style={styles.eventInfo}>
             <Text style={styles.eventInfoLabel}>Evento actual</Text>
             <Text style={styles.eventInfoName} numberOfLines={1}>{eventoNombre || "(ninguno)"}</Text>
+            <Text style={styles.eventInfoMeta}>{fmt(regItems.length)} visibles de {fmt(registrosTotal)} registros</Text>
             <TouchableOpacity testID="admin-export-button" style={styles.exportBtn} onPress={onExport} disabled={exporting || !eventoId}>
               {exporting ? <ActivityIndicator color="#fff" /> : (
                 <>
@@ -526,9 +635,9 @@ export default function AdminScreen() {
             <View style={styles.eventActionRow}>
               <TouchableOpacity
                 testID="admin-clear-event-registros"
-                style={[styles.dangerBtn, (!eventoId || !registros.length) && styles.disabledBtn]}
+                style={[styles.dangerBtn, (!eventoId || !registrosTotal) && styles.disabledBtn]}
                 onPress={onClearAllRegistros}
-                disabled={!eventoId || !registros.length}
+                disabled={!eventoId || !registrosTotal}
               >
                 <Ionicons name="remove-circle-outline" size={17} color={theme.warning} />
                 <Text style={styles.dangerBtnText}>Limpiar</Text>
@@ -546,10 +655,22 @@ export default function AdminScreen() {
           </View>
 
           <FlatList
-            data={registros}
+            data={regItems}
             keyExtractor={(it) => it.id}
             contentContainerStyle={{ paddingVertical: 8, gap: 8 }}
-            ListEmptyComponent={<Text style={styles.empty}>Sin registros en este evento.</Text>}
+            refreshControl={<RefreshControl tintColor={theme.brand} refreshing={regLoading} onRefresh={loadRegistros} />}
+            onEndReached={loadMoreRegistros}
+            onEndReachedThreshold={0.35}
+            ListEmptyComponent={regLoading ? <ActivityIndicator color={theme.brand} style={{ marginTop: 24 }} /> : <Text style={styles.empty}>Sin registros en este evento.</Text>}
+            ListFooterComponent={
+              regHasMore ? (
+                <TouchableOpacity style={styles.loadMoreBtn} onPress={loadMoreRegistros} disabled={regLoadingMore}>
+                  {regLoadingMore ? <ActivityIndicator color="#fff" /> : <Text style={styles.loadMoreText}>Cargar más</Text>}
+                </TouchableOpacity>
+              ) : regItems.length ? (
+                <Text style={styles.listCountText}>{fmt(regItems.length)} de {fmt(registrosTotal)} registros</Text>
+              ) : null
+            }
             renderItem={({ item }) => (
               <View style={styles.afRow}>
                 <View style={{ flex: 1 }}>
@@ -672,6 +793,9 @@ const styles = StyleSheet.create({
   afMeta: { color: theme.textDisabled, fontSize: 11, marginTop: 2 },
   afAction: { padding: 8 },
   empty: { color: theme.textDisabled, textAlign: "center", padding: 40 },
+  loadMoreBtn: { alignSelf: "center", minWidth: 150, marginTop: 8, paddingHorizontal: 18, paddingVertical: 11, borderRadius: 8, backgroundColor: theme.brand, alignItems: "center" },
+  loadMoreText: { color: "#fff", fontWeight: "800", fontSize: 13 },
+  listCountText: { color: theme.textDisabled, textAlign: "center", fontSize: 12, paddingVertical: 12 },
   eventInfo: { padding: 12, backgroundColor: theme.surface, borderRadius: 8, borderWidth: 1, borderColor: theme.border, marginBottom: 10 },
   eventInfoLabel: { color: theme.textSecondary, fontSize: 11, fontWeight: "800", letterSpacing: 1.5, textTransform: "uppercase" },
   eventInfoName: { color: theme.text, fontSize: 18, fontWeight: "800", marginTop: 4 },

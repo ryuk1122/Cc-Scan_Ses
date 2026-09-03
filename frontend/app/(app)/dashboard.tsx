@@ -18,7 +18,7 @@ type Estado = {
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const { eventoId, eventoNombre, wsStatus, queueSize, registros, activos } = useEvento();
+  const { eventoId, eventoNombre, wsStatus, queueSize, totalRegistros, activos } = useEvento();
   const [estado, setEstado] = useState<Estado | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -54,7 +54,7 @@ export default function DashboardScreen() {
     );
   }
 
-  const total = estado?.total ?? registros.length;
+  const total = estado?.total ?? totalRegistros;
   const hoy = estado?.hoy ?? 0;
   const dup = estado?.duplicados_detectados ?? 0;
   const devUsados = estado?.dispositivos_usados ?? 0;

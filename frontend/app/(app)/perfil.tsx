@@ -10,7 +10,7 @@ import { useEvento } from "@/src/ctx/evento";
 
 export default function PerfilScreen() {
   const { user, signOut } = useSession();
-  const { eventoNombre, registros, duplicadosBloqueados, clearEvento } = useEvento();
+  const { eventoNombre, totalRegistros, duplicadosBloqueados, clearEvento } = useEvento();
   const router = useRouter();
 
   const handleLogout = () => {
@@ -54,7 +54,7 @@ export default function PerfilScreen() {
         </View>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Escaneadas</Text>
-          <Text style={styles.rowValue}>{registros.length}</Text>
+          <Text style={styles.rowValue}>{totalRegistros}</Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Duplicados bloqueados</Text>
