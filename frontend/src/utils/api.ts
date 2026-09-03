@@ -77,7 +77,10 @@ export const api = {
     request<any>(`/eventos/${encodeURIComponent(id)}?confirm=${encodeURIComponent(id)}`, { method: "DELETE" }),
   getEvento: (id: string) => request<any>(`/eventos/${id}`),
   estado: (id: string) => request<any>(`/eventos/${id}/estado`),
-  registros: (id: string) => request<any[]>(`/eventos/${id}/registros`),
+  registros: (id: string, limit = 500, skip = 0) =>
+    request<any[]>(`/eventos/${encodeURIComponent(id)}/registros?limit=${limit}&skip=${skip}`),
+  registroCedulas: (id: string) =>
+    request<string[]>(`/eventos/${encodeURIComponent(id)}/cedulas`),
   auditoria: (id: string) => request<any[]>(`/eventos/${id}/auditoria`),
 
   // Afiliados
