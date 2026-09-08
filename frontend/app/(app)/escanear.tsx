@@ -12,10 +12,9 @@ import {
   FlatList,
   Animated,
   ActivityIndicator,
-  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as FileSystem from "expo-file-system";
@@ -27,8 +26,6 @@ import { api } from "@/src/utils/api";
 import { extractCedula, parsePdf417 } from "@/src/utils/cedula";
 import { errorMessage } from "@/src/utils/errors";
 import { analizarConGemini } from "@/src/services/geminiService";
-import { imprimirTicket, conectarImpresoraGuardada } from "@/src/utils/printer";
-import PrinterSelector from "@/src/components/PrinterSelector";
 
 const PILL_TIMEOUT = 2500;
 const RAW_SCAN_COOLDOWN_MS = 900;
@@ -40,6 +37,7 @@ const QR_PREFIX_RE = /(?:^|[^A-Z0-9])(?:CC|NUIP|DOC|CEDULA|DOCUMENTO|ID)\s*[:#-]
 
 type AfiliadoPreview = {
   encontrado: boolean;
+  error?: boolean;
   cedula: string;
   afiliado?: {
     nombre?: string;
@@ -115,30 +113,12 @@ function normalizeAfiliadoData(response: any): PrintPayload {
   };
 }
 
-function capitalize(s: string) {
-  if (!s) return "";
-  return s
-    .toLowerCase()
-    .split(" ")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 function parsedFullName(parsed: ParsedCedulaResult): string {
   return [
     parsed.nombres,
     parsed.primer_apellido,
     parsed.segundo_apellido,
   ].filter(Boolean).join(" ").trim();
-}
-
-function buildPrintPayload(registro: any, fallback: PrintPayload, parsed: ParsedCedulaResult): PrintPayload {
-  return {
-    nombre: registro?.nombre || fallback.nombre || parsedFullName(parsed),
-    cargo: registro?.cargo || fallback.cargo || "",
-    municipio: registro?.municipio || fallback.municipio || "",
-    sede: registro?.sede || fallback.sede || "",
-  };
 }
 
 function bestDigitCandidate(value: string): string {
@@ -272,6 +252,10 @@ function extractCedulaFromCameraPayload(raw: string): string {
 
 export default function EscanearScreen() {
   const router = useRouter();
+  const [isFocused, setIsFocused] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const cameraReadBusy = useRef(false);
+  const lookupSequence = useRef(0);
   const {
     eventoId,
     eventoNombre,
@@ -293,8 +277,6 @@ export default function EscanearScreen() {
   const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
   const [iaLoading, setIaLoading] = useState(false);
-  const [showPrinter, setShowPrinter] = useState(false);
-  const [imprimiendo, setImprimiendo] = useState(false);
   const [scannerEnabled, setScannerEnabled] = useState(true);
 
   const [permission, requestPermission] = useCameraPermissions();
@@ -311,6 +293,11 @@ export default function EscanearScreen() {
   const scanLineAnim = useRef(new Animated.Value(0)).current;
   const cameraRef = useRef<any>(null);
   const [reticleHeight, setReticleHeight] = useState(0);
+
+  useFocusEffect(useCallback(() => {
+    setIsFocused(true);
+    return () => setIsFocused(false);
+  }, []));
 
   const showToast = useCallback((kind: "ok" | "dup" | "err", text: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -382,44 +369,20 @@ export default function EscanearScreen() {
   }, [mode, scanLineAnim]);
 
   const lookupAfiliado = useCallback(async (cedula: string) => {
+    const sequence = ++lookupSequence.current;
     setPreviewLoading(true);
     try {
       const r = await api.lookupAfiliado(cedula);
-      setPreview(r as AfiliadoPreview);
+      if (sequence !== lookupSequence.current) return;
+      setPreview({ ...r, afiliado: { ...r.afiliado, ...normalizeAfiliadoData(r) } });
     } catch {
-      setPreview({ encontrado: false, cedula });
+      if (sequence === lookupSequence.current) setPreview({ encontrado: false, cedula, error: true });
     } finally {
-      setPreviewLoading(false);
+      if (sequence === lookupSequence.current) setPreviewLoading(false);
     }
   }, []);
 
-  const tryPrint = useCallback(
-    async (nombre: string, cargo: string, municipio: string) => {
-      try {
-        setImprimiendo(true);
-        const connected = await conectarImpresoraGuardada();
-        if (!connected) {
-          showToast("err", "Sin impresora guardada. Selecciona una impresora Bluetooth.");
-          setShowPrinter(true);
-          return;
-        }
-        await imprimirTicket({
-          nombre: capitalize(nombre),
-          cargo: capitalize(cargo),
-          municipio: capitalize(municipio),
-        });
-        showToast("ok", "Escarapela enviada a impresora");
-      } catch (e: any) {
-        console.warn("[Printer]", e?.message ?? e);
-        showToast("err", "Error al imprimir: " + (e?.message ?? "fallo"));
-      } finally {
-        setImprimiendo(false);
-      }
-    },
-    [showToast],
-  );
-
-  const captureCameraBase64 = useCallback(async (quality: number): Promise<string> => {
+  const captureCameraBase64 = useCallback(async (quality: number, skipProcessing = true): Promise<string> => {
     if (!cameraRef.current) return "";
     if (typeof cameraRef.current.takePhoto === "function") {
       const photo = await cameraRef.current.takePhoto({ flash: "off" });
@@ -432,7 +395,7 @@ export default function EscanearScreen() {
     const photo = await cameraRef.current.takePictureAsync({
       quality,
       base64: true,
-      skipProcessing: false,
+      skipProcessing,
     });
     return photo?.base64 || "";
   }, []);
@@ -442,7 +405,7 @@ export default function EscanearScreen() {
     iaLoadingRef.current = true;
     setIaLoading(true);
     try {
-      const b64 = imageBase64 || await captureCameraBase64(0.92);
+      const b64 = imageBase64 || await captureCameraBase64(0.78, false);
       if (!b64) return null;
       const iaResult = await analizarConGemini(b64);
       return iaResult?.cedula ? iaResult : null;
@@ -459,12 +422,12 @@ export default function EscanearScreen() {
     ocrLoadingRef.current = true;
     setOcrLoading(true);
     try {
-      const b64 = imageBase64 || await captureCameraBase64(0.72);
+      const b64 = imageBase64 || await captureCameraBase64(0.72, false);
       if (!b64) return { raw: "" };
       const res = await api.ocrCedula(b64);
       if (res.ok && res.cedula) {
         const raw = res.raw_mrz?.length ? res.raw_mrz.join("\n") : (res.texto_completo || res.cedula);
-        const serverParsed = res.parsed && Object.keys(res.parsed).length > 0 ? res.parsed : undefined;
+        const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
         return { raw, serverParsed };
       }
       return { raw: "" };
@@ -477,17 +440,17 @@ export default function EscanearScreen() {
   }, [captureCameraBase64]);
 
   const readCameraBarcode = useCallback(
-    async (silent = false, imageBase64?: string, options: { preferMrz?: boolean } = {}): Promise<OcrReadResult> => {
+    async (silent = false, imageBase64?: string, options: { preferMrz?: boolean; skipMrz?: boolean } = {}): Promise<OcrReadResult> => {
       if ((!imageBase64 && !cameraRef.current) || barcodeLoadingRef.current) return { raw: "" };
       barcodeLoadingRef.current = true;
       setBarcodeLoading(true);
       try {
-        const b64 = imageBase64 || await captureCameraBase64(0.82);
+        const b64 = imageBase64 || await captureCameraBase64(options.preferMrz ? 0.78 : 0.68);
         if (!b64) return { raw: "" };
-        const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz });
+        const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz, skipMrz: !!options.skipMrz });
         if (res.ok && res.cedula) {
           const raw = res.raw || res.raw_mrz?.join("\n") || res.cedula;
-          const serverParsed = res.parsed && Object.keys(res.parsed).length > 0 ? res.parsed : undefined;
+          const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
           return { raw, serverParsed };
         }
         return { raw: "" };
@@ -564,13 +527,26 @@ export default function EscanearScreen() {
         }
         lastScanRef.current = { value: cedula, at: now };
 
+        const previewSequence = ++lookupSequence.current;
+        setPreview(null);
+        setPreviewLoading(true);
         let lookupPrint: PrintPayload = { nombre: "", cargo: "", municipio: "" };
+        let esAfiliado: boolean | undefined;
         try {
           const afiliadoResponse = await api.lookupAfiliado(cedula);
+          esAfiliado = !!afiliadoResponse?.encontrado;
           lookupPrint = normalizeAfiliadoData(afiliadoResponse);
-          setPreview(afiliadoResponse as AfiliadoPreview);
+          if (previewSequence === lookupSequence.current) {
+            setPreview({ ...afiliadoResponse, afiliado: { ...afiliadoResponse.afiliado, ...lookupPrint } });
+          }
         } catch {
-          setPreview({ encontrado: false, cedula });
+          if (previewSequence === lookupSequence.current) {
+            setPreview({ encontrado: false, cedula, error: true });
+          }
+        } finally {
+          if (previewSequence === lookupSequence.current) {
+            setPreviewLoading(false);
+          }
         }
         const printFallback: PrintPayload = {
           nombre: lookupPrint.nombre || parsedFullName(parsed),
@@ -584,6 +560,7 @@ export default function EscanearScreen() {
           cargo: printFallback.cargo,
           municipio: printFallback.municipio,
           sede: printFallback.sede,
+          es_afiliado: esAfiliado,
           raw_barcode: rawToUse,
           primer_apellido: parsed.primer_apellido,
           segundo_apellido: parsed.segundo_apellido,
@@ -594,8 +571,6 @@ export default function EscanearScreen() {
           tipo_sangre: parsed.tipo_sangre,
         } as any);
         if (res.ok) {
-          const printData = buildPrintPayload(res.registro, printFallback, parsed);
-          void tryPrint(printData.nombre, printData.cargo, printData.municipio);
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           showToast("ok", `Cédula ${cedula} registrada`);
         } else if (res.duplicate) {
@@ -611,60 +586,46 @@ export default function EscanearScreen() {
         if (mode === "camera") rearmScanner();
       }
     },
-    [mode, scan, showToast, flashDuplicate, captureCameraBase64, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, buildDocumentPreview, tryPrint, rearmScanner],
+    [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner],
   );
 
   const captureAndDecodeBarcode = useCallback(async () => {
-    if (!cameraRef.current) return;
+    if (!cameraRef.current || cameraReadBusy.current || scanBusyRef.current) return;
+    cameraReadBusy.current = true;
+    try {
+      const imageBase64 = await captureCameraBase64(0.65);
+      if (!imageBase64) {
+        showToast("err", "No pude tomar la foto. Intenta de nuevo.");
+        return;
+      }
 
-    const imageBase64 = await captureCameraBase64(0.92);
-    if (!imageBase64) {
-      showToast("err", "No pude tomar la foto. Intenta de nuevo.");
-      return;
+      showToast("err", "Leyendo MRZ...");
+      const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true, timeoutMs: 7000 });
+      if (barcodeResult.raw) {
+        await handleScan(barcodeResult.raw, {
+          skipBarcodeFallback: true,
+          serverParsed: barcodeResult.serverParsed,
+        });
+        return;
+      }
+
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      showToast("err", "MRZ no detectado. Acerca la cedula y toca otra vez.");
+    } catch {
+      showToast("err", "MRZ no detectado. Intenta de nuevo.");
+    } finally {
+      cameraReadBusy.current = false;
     }
-
-    showToast("err", "Analizando con IA...");
-    const iaResult = await readCameraWithGemini(imageBase64);
-    const iaCedula = cleanCedulaNumber(iaResult?.cedula);
-    if (iaCedula) {
-      await handleScan(iaCedula, {
-        skipBarcodeFallback: true,
-        serverParsed: iaResult || undefined,
-      });
-      return;
-    }
-
-    showToast("err", "IA sin resultado. Intentando QR/DataMatrix, MRZ y barras...");
-    const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
-    if (barcodeResult.raw) {
-      await handleScan(barcodeResult.raw, {
-        skipBarcodeFallback: true,
-        serverParsed: barcodeResult.serverParsed,
-      });
-      return;
-    }
-
-    showToast("err", "MRZ/QR sin resultado. Intentando OCR...");
-    const ocrResult = await readCameraWithOcr(imageBase64);
-    if (ocrResult.raw) {
-      await handleScan(ocrResult.raw, {
-        skipBarcodeFallback: true,
-        serverParsed: ocrResult.serverParsed,
-      });
-      return;
-    }
-
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    showToast("err", "No pude leer la cedula. Acerca la camara, enfoca y evita reflejos.");
-  }, [captureCameraBase64, handleScan, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, showToast]);
+  }, [captureCameraBase64, handleScan, readCameraBarcode, showToast]);
 
   // Auto-lookup as user types in manual mode (debounced)
   useEffect(() => {
+    lookupSequence.current++;
     if (mode !== "manual") return;
     const cedula = extractCedula(cedulaInput);
     if (!cedula || cedula.length < 6) {
-      setPreview(null);
-      return;
+      const clear = setTimeout(() => { setPreview(null); setPreviewLoading(false); }, 0);
+      return () => clearTimeout(clear);
     }
     const id = setTimeout(() => lookupAfiliado(cedula), 350);
     return () => clearTimeout(id);
@@ -677,8 +638,7 @@ export default function EscanearScreen() {
       return;
     }
     await handleScan(cedula);
-    setCedulaInput("");
-    setPreview(null);
+
   };
 
 
@@ -724,9 +684,6 @@ export default function EscanearScreen() {
           <TouchableOpacity testID="change-event-button" style={styles.switchEventBtn} onPress={clearEvento}>
             <Ionicons name="swap-horizontal" size={18} color={theme.text} />
           </TouchableOpacity>
-          <TouchableOpacity testID="printer-settings-button" style={styles.switchEventBtn} onPress={() => setShowPrinter(true)}>
-            <Ionicons name={imprimiendo ? "print" : "print-outline"} size={18} color={theme.text} />
-          </TouchableOpacity>
           <View style={styles.counterPill}>
             <Text testID="scan-counter" style={styles.counterValue}>{totalRegistros}</Text>
             <Text style={styles.counterLabel}>escaneadas</Text>
@@ -753,7 +710,7 @@ export default function EscanearScreen() {
         </TouchableOpacity>
       </View>
 
-      {mode === "camera" ? (
+      {mode === "camera" && isFocused ? (
         <View style={styles.cameraWrap} testID="scanner-camera-view">
           {!permission ? (
             <View style={styles.camPlaceholder}><Text style={styles.permText}>Iniciando cámara...</Text></View>
@@ -769,13 +726,14 @@ export default function EscanearScreen() {
           ) : (
             <CameraView
   ref={cameraRef}
+  onCameraReady={() => setCameraReady(true)}
   style={ABSOLUTE_FILL}
   facing="back"
   autofocus="on"
   barcodeScannerSettings={{
     barcodeTypes: ["pdf417", "qr", "datamatrix"],
   }}
-  onBarcodeScanned={scannerEnabled ? ({ raw, data }) => {
+  onBarcodeScanned={scannerEnabled ? ({ raw, data, type }) => {
     const payload = scannedPayload(raw, data);
     if (!payload) return;
     const normalized = normalizeQrCedulaPayload(payload);
@@ -789,7 +747,20 @@ export default function EscanearScreen() {
     }
     lastRawScanRef.current = { value: normalized, at: now };
     const hasDirectCedula = !!extractCedulaFromCameraPayload(normalized);
-    if (!hasDirectCedula) return;
+    if (!hasDirectCedula) {
+      // DEBUG TEMPORAL: confirma si el QR trae texto usable o va cifrado/binario.
+      // Quita este bloque (o cambia a __DEV__) cuando termines de diagnosticar.
+      console.log("[scan] barcode sin cedula extraible", {
+        type,
+        length: payload.length,
+        preview: payload.slice(0, 60),
+        isPrintableAscii: /^[\x20-\x7E]*$/.test(payload),
+      });
+      if (type === "qr") {
+        showToast("err", "QR detectado pero sin cédula legible. Usa PDF417, MRZ o manual.");
+      }
+      return;
+    }
     void handleScan(normalized, { skipBarcodeFallback: true });
               } : undefined}>
               <View style={styles.reticleOverlay} pointerEvents="none">
@@ -809,7 +780,7 @@ export default function EscanearScreen() {
                     <View style={styles.mrzGuideLine} />
                   </View>
                 </View>
-                <Text style={styles.reticleHint}>Centra la cedula: QR/DataMatrix, barras o MRZ</Text>
+                <Text style={styles.reticleHint}>PDF417 o QR lee directo. MRZ usa una foto solo al tocar.</Text>
               </View>
               <View style={styles.captureBar}>
                 <TouchableOpacity
@@ -823,7 +794,7 @@ export default function EscanearScreen() {
                   ) : (
                     <>
                       <Ionicons name="scan-circle" size={24} color="#fff" />
-                      <Text style={styles.captureBtnText}>Leer cedula</Text>
+                      <Text style={styles.captureBtnText}>Leer MRZ</Text>
                     </>
                   )}
                 </TouchableOpacity>
@@ -848,36 +819,6 @@ export default function EscanearScreen() {
                 maxLength={11}
               />
 
-              {/* Afiliado preview */}
-              {previewLoading && (
-                <View style={styles.previewWrap}>
-                  <ActivityIndicator size="small" color={theme.brand} />
-                  <Text style={styles.previewMeta}>Buscando en base de datos...</Text>
-                </View>
-              )}
-              {!previewLoading && preview && preview.encontrado && preview.afiliado && (
-                <View testID="afiliado-preview" style={[styles.previewWrap, { borderColor: theme.success, backgroundColor: theme.successBg }]}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Ionicons name="checkmark-circle" size={20} color={theme.success} />
-                    <Text style={[styles.previewTitle, { color: theme.success }]}>Docente encontrado</Text>
-                  </View>
-                  <Text style={styles.previewName} numberOfLines={2}>{preview.afiliado.nombre || "(sin nombre)"}</Text>
-                  <Text style={styles.previewMeta}>Docente: SI</Text>
-                  <Text style={styles.previewMeta}>CC {preview.cedula}</Text>
-                  {!!preview.afiliado.cargo && <Text style={styles.previewMeta}>Cargo: {preview.afiliado.cargo}</Text>}
-                  {!!preview.afiliado.municipio && <Text style={styles.previewMeta}>Municipio: {preview.afiliado.municipio}</Text>}
-                </View>
-              )}
-              {!previewLoading && preview && !preview.encontrado && (
-                <View style={[styles.previewWrap, { borderColor: theme.warning, backgroundColor: theme.warningBg }]}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <Ionicons name="alert-circle" size={20} color={theme.warning} />
-                    <Text style={[styles.previewTitle, { color: theme.warning }]}>No esta en la base interna</Text>
-                  </View>
-                  <Text style={styles.previewMeta}>Se registrara solo con la CC leida.</Text>
-                </View>
-              )}
-
               <TouchableOpacity testID="manual-submit-button" style={styles.submitBtn} onPress={onManualSubmit}>
                 <Ionicons name="checkmark-circle" size={22} color="#fff" />
                 <Text style={styles.submitBtnText}>Registrar</Text>
@@ -885,6 +826,15 @@ export default function EscanearScreen() {
             </View>
           </ScrollView>
         </KeyboardAvoidingView>
+      )}
+
+      {(previewLoading || preview) && (
+        <View accessibilityLiveRegion="polite" testID="docente-result" style={[styles.teacherCard, { backgroundColor: previewLoading || preview?.error ? "#334155" : preview?.encontrado ? "#14532d" : "#991b1b" }]}>
+          <Text style={styles.teacherAnswer}>{previewLoading ? "CONSULTANDO DOCENTE…" : preview?.error ? "DOCENTE: SIN VERIFICAR" : preview?.encontrado ? "DOCENTE: SÍ" : "DOCENTE: NO"}</Text>
+          {!!preview && <Text style={styles.teacherDetail}>CC {preview.cedula}{preview.afiliado?.nombre ? " · " + preview.afiliado.nombre : ""}</Text>}
+          {!previewLoading && <Text style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
+          {preview?.error && <Text style={styles.teacherDetail}>No se pudo consultar la base. Comprueba la conexión.</Text>}
+        </View>
       )}
 
       {documentPreview && (
@@ -927,7 +877,7 @@ export default function EscanearScreen() {
           renderItem={({ item }) => (
             <View style={styles.recentChip}>
               <Text style={styles.recentCedula}>{item.cedula}</Text>
-              <Text style={styles.recentField}>{item.es_afiliado ? "Docente: SI" : "Docente: NO"}</Text>
+              <Text style={[styles.recentField, { fontSize: 19, fontWeight: "900" }]}>{item.es_afiliado == null ? "Docente: sin verificar" : item.es_afiliado ? "DOCENTE: SÍ" : "DOCENTE: NO"}</Text>
               {!!item.nombre && <Text style={styles.recentName} numberOfLines={1}>{item.nombre}</Text>}
               {!!item.cargo && <Text style={styles.recentField} numberOfLines={1}>{item.cargo}</Text>}
               {!!item.municipio && <Text style={styles.recentField} numberOfLines={1}>{item.municipio}</Text>}
@@ -950,29 +900,15 @@ export default function EscanearScreen() {
         </View>
       )}
 
-      <Modal
-        visible={showPrinter}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowPrinter(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Impresora Bluetooth</Text>
-              <TouchableOpacity onPress={() => setShowPrinter(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Ionicons name="close" size={24} color={theme.text} />
-              </TouchableOpacity>
-            </View>
-            <PrinterSelector />
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  teacherCard: { marginHorizontal: 16, marginVertical: 8, padding: 16, borderRadius: 16, gap: 5 },
+  teacherAnswer: { color: "#fff", fontSize: 30, fontWeight: "900" },
+  teacherDetail: { color: "#fff", fontSize: 15 },
+  teacherMunicipality: { color: "#fff", fontSize: 20, fontWeight: "700" },
   container: { flex: 1, backgroundColor: theme.bg },
   topBar: { flexDirection: "row", paddingHorizontal: 14, paddingTop: 6, paddingBottom: 8, alignItems: "center", gap: 10 },
   eventTitle: { color: theme.text, fontSize: 17, fontWeight: "900" },
@@ -1062,10 +998,6 @@ const styles = StyleSheet.create({
   recentField: { color: theme.textDisabled, fontSize: 10, marginTop: 1 },
   toast: { position: "absolute", top: 80, left: 20, right: 20, padding: 14, borderRadius: 14, borderWidth: 1, zIndex: 200 },
   toastText: { color: theme.text, fontWeight: "800", fontSize: 14, textAlign: "center" },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
-  modalCard: { backgroundColor: theme.surface, borderTopLeftRadius: 8, borderTopRightRadius: 8, padding: 16, maxHeight: "82%" },
-  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
-  modalTitle: { color: theme.text, fontSize: 18, fontWeight: "900" },
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32, gap: 12 },
   emptyTitle: { color: theme.text, fontSize: 20, fontWeight: "800" },
   emptySub: { color: theme.textSecondary, textAlign: "center" },
