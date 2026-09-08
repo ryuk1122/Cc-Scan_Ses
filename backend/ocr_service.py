@@ -577,32 +577,107 @@ _MRZ_TESS_CONFIGS = [
 ]
 
 
+def _detect_mrz_band_cv(rotated: "Image.Image") -> Optional[Tuple[int, int, int, int]]:
+    """
+    Detecta la banda MRZ real por contornos en vez de asumir un porcentaje fijo.
+    El MRZ es una franja de líneas de texto monoespaciado muy densas y repetitivas:
+    al aplicar un kernel morfológico horizontal ancho, esas líneas se funden en
+    blobs rectangulares anchos y bajos, fáciles de distinguir del resto de la tarjeta.
+    Retorna (left, top, right, bottom) del mejor candidato o None si no hay cv2/numpy
+    o no se encontró nada con forma de MRZ.
+    """
+    if cv2 is None or np is None:
+        return None
+    try:
+        arr = np.array(rotated.convert("L"))
+        h, w = arr.shape[:2]
+        if h < 60 or w < 180:
+            return None
+
+        # Solo buscamos en la mitad inferior: ahí vive el MRZ en cédula nueva y antigua.
+        search_top = int(h * 0.35)
+        sub = arr[search_top:h, 0:w]
+
+        blur = cv2.GaussianBlur(sub, (3, 3), 0)
+        grad = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+        grad = cv2.convertScaleAbs(grad)
+        _, thresh = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+
+        # Kernel ancho y bajo: funde texto MRZ en una sola franja horizontal continua.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, w // 20), 5))
+        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        best_score = 0.0
+        for c in contours:
+            x, y, cw, ch = cv2.boundingRect(c)
+            if cw < w * 0.55:
+                continue
+            aspect = cw / max(ch, 1)
+            if aspect < 4:
+                continue
+            # Preferimos franjas anchas, con aspecto alto y ubicadas más abajo en la tarjeta.
+            score = aspect * (1 + (y / max(h - search_top, 1)))
+            if score > best_score:
+                best_score = score
+                best = (x, y, cw, ch)
+
+        if best is None:
+            return None
+
+        x, y, cw, ch = best
+        top = search_top + y
+        # Damos margen alrededor de la banda detectada para no cortar caracteres.
+        pad_y = max(6, int(ch * 0.6))
+        pad_x = max(6, int(w * 0.02))
+        left = max(0, x - pad_x)
+        right = min(w, x + cw + pad_x)
+        bottom = min(h, top + ch + pad_y)
+        top = max(0, top - pad_y // 2)
+        if right - left < 180 or bottom - top < 40:
+            return None
+        return (left, top, right, bottom)
+    except Exception:
+        return None
+
+
 def _mrz_crop_candidates(img: "Image.Image") -> List["Image.Image"]:
     base = ImageOps.exif_transpose(img).convert("RGB")
     crops: List["Image.Image"] = []
     seen: set[tuple[int, int, int, int, int]] = set()
+
+    def _add(angle: int, rotated: "Image.Image", box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = box
+        if right - left < 180 or bottom - top < 40:
+            return
+        key = (angle, left, top, right, bottom)
+        if key in seen:
+            return
+        seen.add(key)
+        crops.append(rotated.crop(box))
+
     for angle in (0, 180):
         rotated = base if angle == 0 else base.rotate(angle, expand=True)
         w, h = rotated.size
+
+        # 1) Prioridad máxima: banda MRZ detectada por contornos (más robusta ante
+        #    rotación leve, encuadre irregular o proporciones fuera de lo esperado).
+        detected = _detect_mrz_band_cv(rotated)
+        if detected:
+            _add(angle, rotated, detected)
+
+        # 2) Fallback por proporciones fijas, ordenado por probabilidad real:
+        #    cédula nueva 2022+ primero (la más común hoy), luego variantes antiguas.
         boxes = [
-            # Cédulas nuevas 2022+: MRZ en mitad inferior visible
-            (0, int(h * 0.55), w, h),
+            (0, int(h * 0.55), w, h),                                   # cédula nueva 2022+
             (0, int(h * 0.50), w, int(h * 0.98)),
-            # Cédulas antiguas: MRZ más arriba
-            (0, int(h * 0.42), w, h),
             (int(w * 0.03), int(h * 0.52), int(w * 0.97), int(h * 0.98)),
-            # Fallback imagen completa
-            # Extra: solo zona baja absoluta (cédulas con MRZ muy al fondo)
+            (0, int(h * 0.42), w, h),                                   # cédulas antiguas
         ]
         for box in boxes:
-            left, top, right, bottom = box
-            if right - left < 180 or bottom - top < 60:
-                continue
-            key = (angle, left, top, right, bottom)
-            if key in seen:
-                continue
-            seen.add(key)
-            crops.append(rotated.crop(box))
+            _add(angle, rotated, box)
+
     return crops
 
 
@@ -666,23 +741,50 @@ def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
         }
 
     all_texts: List[str] = []
+    # Guardamos el mejor candidato SIN checksum válido como red de seguridad:
+    # si ningún intento pasa el checksum MRZ, preferimos devolver algo (comportamiento
+    # actual) antes que fallar del todo. Pero ya no devolvemos el primer match a ciegas:
+    # cualquier resultado con mrz_valido=True gana de inmediato sobre uno sin validar.
+    best_unvalidated: Optional[Dict[str, Any]] = None
+
+    # Límite de intentos para no degenerar en cientos de llamadas a Tesseract cuando
+    # ni la detección por contornos ni las proporciones fijas dan con la banda MRZ.
+    MAX_ATTEMPTS = 60
+    attempts = 0
+
     for crop in _mrz_crop_candidates(original):
         for proc_img in _preprocess_mrz(crop):
             for config in _MRZ_TESS_CONFIGS:
+                if attempts >= MAX_ATTEMPTS:
+                    break
+                attempts += 1
                 text = _run_mrz_tesseract(proc_img, config)
                 if not text:
                     continue
                 all_texts.append(text)
                 parsed = parse_mrz_from_text(text)
-                if parsed.get("cedula"):
-                    return {
-                        "ok": True,
-                        "cedula": parsed.get("cedula") or "",
-                        "texto_completo": text,
-                        "parsed": parsed,
-                        "raw_mrz": parsed.get("raw_mrz") or [],
-                        "mrz_valido": bool(parsed.get("mrz_valido")),
-                    }
+                if not parsed.get("cedula"):
+                    continue
+
+                candidate = {
+                    "ok": True,
+                    "cedula": parsed.get("cedula") or "",
+                    "texto_completo": text,
+                    "parsed": parsed,
+                    "raw_mrz": parsed.get("raw_mrz") or [],
+                    "mrz_valido": bool(parsed.get("mrz_valido")),
+                }
+                if candidate["mrz_valido"]:
+                    return candidate
+                if best_unvalidated is None:
+                    best_unvalidated = candidate
+            if attempts >= MAX_ATTEMPTS:
+                break
+        if attempts >= MAX_ATTEMPTS:
+            break
+
+    if best_unvalidated is not None:
+        return best_unvalidated
 
     combined = "\n".join(all_texts)
     parsed = parse_mrz_from_text(combined)
