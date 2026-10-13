@@ -46,6 +46,8 @@ type AfiliadoPreview = {
     cargo?: string;
     zona?: string;
     titulo?: string;
+    aportes_al_dia?: boolean | null;
+    estado_aportes?: string;
   };
 };
 
@@ -440,14 +442,14 @@ export default function EscanearScreen() {
   }, [captureCameraBase64]);
 
   const readCameraBarcode = useCallback(
-    async (silent = false, imageBase64?: string, options: { preferMrz?: boolean; skipMrz?: boolean } = {}): Promise<OcrReadResult> => {
+    async (silent = false, imageBase64?: string, options: { preferMrz?: boolean } = {}): Promise<OcrReadResult> => {
       if ((!imageBase64 && !cameraRef.current) || barcodeLoadingRef.current) return { raw: "" };
       barcodeLoadingRef.current = true;
       setBarcodeLoading(true);
       try {
         const b64 = imageBase64 || await captureCameraBase64(options.preferMrz ? 0.78 : 0.68);
         if (!b64) return { raw: "" };
-        const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz, skipMrz: !!options.skipMrz });
+        const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz });
         if (res.ok && res.cedula) {
           const raw = res.raw || res.raw_mrz?.join("\n") || res.cedula;
           const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
@@ -600,7 +602,7 @@ export default function EscanearScreen() {
       }
 
       showToast("err", "Leyendo MRZ...");
-      const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true, timeoutMs: 7000 });
+      const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
       if (barcodeResult.raw) {
         await handleScan(barcodeResult.raw, {
           skipBarcodeFallback: true,

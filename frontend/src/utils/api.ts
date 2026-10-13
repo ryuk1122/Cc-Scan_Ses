@@ -2,6 +2,7 @@
  * API client for CedulaScan Pro.
  */
 import Constants from "expo-constants";
+import { File as ExpoFile } from "expo-file-system";
 import { storage } from "@/src/utils/storage";
 
 const rawBase =
@@ -157,20 +158,18 @@ export const api = {
   ): Promise<any> => {
     if (!BASE) throw { status: 0, detail: "EXPO_PUBLIC_BACKEND_URL no está configurada" } as ApiError;
     const t = await getToken();
-    const ext = (file.name.split(".").pop() || "").toLowerCase();
-    const inferredType =
-      file.mimeType ||
-      (ext === "csv" ? "text/csv" : "") ||
-      (ext === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "") ||
-      (ext === "xls" ? "application/vnd.ms-excel" : "") ||
-      "application/octet-stream";
+    // Expo SDK 56 convierte FormData antes de enviarlo y no acepta el descriptor
+    // React Native { uri, name, type }; esa ruta produce
+    // "Unsupported FormDataPart implementation". ExpoFile se pasa directamente
+    // porque su implementación de bytes() es compatible con el serializador Expo.
     const form = new FormData();
-    // @ts-ignore — React Native FormData acepta este formato de objeto
-    form.append("file", { uri: file.uri, name: file.name || `afiliados.${ext || "csv"}`, type: inferredType });
+    const filePart = new ExpoFile(file.uri);
+    form.append("file", filePart);
     const res = await fetch(`${BASE}/api/admin/afiliados/import`, {
       method: "POST",
+      // No fijar Content-Type aquí: fetch agrega multipart/form-data con su boundary.
       headers: { Authorization: `Bearer ${t}` },
-      body: form as any,
+      body: form,
     });
     const text = await res.text();
     let data: any = null;
