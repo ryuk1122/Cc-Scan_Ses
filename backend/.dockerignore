@@ -1,0 +1,10 @@
+.env
+.mongo-data
+.venv
+venv
+.expo
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+*.log
