@@ -3,6 +3,11 @@
 # IDE and editors
 .idea/
 .vscode/
+.gitconfig
+backend/seed/afiliados.csv
+frontend/android/app/debug.keystore
+memory/**
+!memory/.gitkeep
 
 # Dependencies
 node_modules/

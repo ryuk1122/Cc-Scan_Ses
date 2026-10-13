@@ -152,6 +152,8 @@ class AfiliadoUpdate(BaseModel):
     email: Optional[str] = None
     celular: Optional[str] = None
     fecha_nac: Optional[str] = None
+    aportes_al_dia: Optional[bool] = None
+    estado_aportes: Optional[str] = None
 
 
 class RegistroUpdate(BaseModel):
@@ -952,7 +954,13 @@ def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> No
             if candidate and clean_cedula(candidate) != ced and re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", candidate):
                 nombre = candidate
                 break
-    items.append({
+    estado_aportes = pick(
+        "estado_aportes", "estado aportes", "estado de aportes", "aportes",
+        "aporte", "aportes al dia", "aportes al día", "al dia", "al día",
+        "paz y salvo", "paz salvo", "morosidad", "vigencia aportes",
+    )
+    aportes_al_dia = _parse_aportes_al_dia(estado_aportes)
+    item = {
         "cedula":    ced,
         "nombre":    nombre,
         "sede":      pick("sede", "institucion", "institución", "institucion_educativa", "institucion educativa", "establecimiento", "establecimiento educativo", "colegio", "ie"),
@@ -963,8 +971,24 @@ def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> No
         "email":     pick("email", "correo", "correo electronico", "correo electrónico", "e mail"),
         "celular":   pick("celular", "telefono", "teléfono", "movil", "móvil", "whatsapp", "contacto"),
         "fecha_nac": pick("fecha_nac", "fecha nac.", "fecha_nacimiento", "fecha nacimiento", "nacimiento", "fecha de nacimiento"),
-    })
-    items[-1]["zona"] = pick("zona", "zona educativa", "region", "región", "ente", "sector")
+    }
+    item["zona"] = pick("zona", "zona educativa", "region", "región", "ente", "sector")
+    if estado_aportes:
+        item["estado_aportes"] = estado_aportes
+    if aportes_al_dia is not None:
+        item["aportes_al_dia"] = aportes_al_dia
+    items.append(item)
+
+
+def _parse_aportes_al_dia(value: str) -> Optional[bool]:
+    if not value:
+        return None
+    normalized = _normalize_import_key(value)
+    if normalized in {"si", "s", "true", "1", "x", "al dia", "vigente", "activo", "paz y salvo", "paz salvo", "cumple", "ok"}:
+        return True
+    if normalized in {"no", "n", "false", "0", "no al dia", "moroso", "mora", "vencido", "inactivo", "pendiente", "atrasado"}:
+        return False
+    return None
 
 
 @api.patch("/admin/afiliados/{cedula}")

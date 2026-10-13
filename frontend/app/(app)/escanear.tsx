@@ -833,6 +833,14 @@ export default function EscanearScreen() {
           <Text style={styles.teacherAnswer}>{previewLoading ? "CONSULTANDO DOCENTE…" : preview?.error ? "DOCENTE: SIN VERIFICAR" : preview?.encontrado ? "DOCENTE: SÍ" : "DOCENTE: NO"}</Text>
           {!!preview && <Text style={styles.teacherDetail}>CC {preview.cedula}{preview.afiliado?.nombre ? " · " + preview.afiliado.nombre : ""}</Text>}
           {!previewLoading && <Text style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
+          {!previewLoading && !preview?.error && preview?.encontrado && (
+            <Text
+              testID="aportes-status"
+              style={[styles.aportesStatus, { color: preview?.afiliado?.aportes_al_dia === true ? "#86efac" : preview?.afiliado?.aportes_al_dia === false ? "#fecaca" : "#fde68a" }]}
+            >
+              APORTES: {preview?.afiliado?.aportes_al_dia === true ? "AL DÍA" : preview?.afiliado?.aportes_al_dia === false ? "NO AL DÍA" : preview?.afiliado?.estado_aportes ? String(preview.afiliado.estado_aportes).toUpperCase() : "SIN INFORMACIÓN"}
+            </Text>
+          )}
           {preview?.error && <Text style={styles.teacherDetail}>No se pudo consultar la base. Comprueba la conexión.</Text>}
         </View>
       )}
@@ -909,6 +917,7 @@ const styles = StyleSheet.create({
   teacherAnswer: { color: "#fff", fontSize: 30, fontWeight: "900" },
   teacherDetail: { color: "#fff", fontSize: 15 },
   teacherMunicipality: { color: "#fff", fontSize: 20, fontWeight: "700" },
+  aportesStatus: { color: "#fde68a", fontSize: 18, fontWeight: "900", marginTop: 7, letterSpacing: 0.5 },
   container: { flex: 1, backgroundColor: theme.bg },
   topBar: { flexDirection: "row", paddingHorizontal: 14, paddingTop: 6, paddingBottom: 8, alignItems: "center", gap: 10 },
   eventTitle: { color: theme.text, fontSize: 17, fontWeight: "900" },
