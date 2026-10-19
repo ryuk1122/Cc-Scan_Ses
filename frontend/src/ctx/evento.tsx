@@ -88,11 +88,37 @@ type QueueItem = {
   tipo_sangre?: string;
   idempotency_key: string;
   attempts: number;
+  next_attempt_at?: number;
+  last_error?: string;
 };
 
-function shouldQueueAfterError(err: any): boolean {
-  const status = Number(err?.status || 0);
-  return status === 0 || status === 408 || status === 502 || status === 503 || status === 504;
+function queuedRegistro(item: QueueItem): Registro {
+  return {
+    id: `local_${item.idempotency_key}`,
+    evento_id: item.evento_id,
+    cedula: item.cedula,
+    nombre: item.nombre,
+    sede: item.sede,
+    municipio: item.municipio,
+    cargo: item.cargo,
+    device_id: item.device_id,
+    operator_email: "(pendiente)",
+    timestamp: item.timestamp,
+    created_at: new Date(item.timestamp).toISOString(),
+  };
+}
+
+// Serialize queue read/modify/write operations. A scan enqueue must never be
+// overwritten by a simultaneous background sync on the same device.
+let queueMutation = Promise.resolve();
+function withQueueLock<T>(work: () => Promise<T>): Promise<T> {
+  const next = queueMutation.then(work, work);
+  queueMutation = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+function retryDelay(attempts: number): number {
+  return Math.min(5 * 60_000, 5_000 * 2 ** Math.min(attempts, 6));
 }
 
 function scanErrorMessage(err: any, fallback: string): string {
@@ -121,6 +147,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const reconnectTimer = useRef<any>(null);
   const pingTimer = useRef<any>(null);
   const deviceIdRef = useRef<string>("");
+  const isFlushingRef = useRef(false);
 
   useEffect(() => {
     getDeviceId().then((d) => (deviceIdRef.current = d));
@@ -136,11 +163,16 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       const saved = await storage.getItem<StoredEvento | null>(SELECTED_EVENT_KEY, null);
       if (cancelled || !saved?.id) return;
       const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${saved.id}`, null)) || [];
+      const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
+        .filter((item) => item.evento_id === saved.id);
+      const visible = [...pending.map(queuedRegistro), ...cached.filter((r) => !pending.some((item) => item.cedula === r.cedula))]
+        .slice(0, REGISTROS_RECENT_LIMIT);
       setEventoId(saved.id);
       setEventoNombre(saved.nombre || "");
-      cedulasSetRef.current = new Set(cached.map((r) => r.cedula));
-      setRegistros(cached);
+      cedulasSetRef.current = new Set([...cached.map((r) => r.cedula), ...pending.map((r) => r.cedula)]);
+      setRegistros(visible);
       setTotalRegistros(cached.length);
+      setQueueSize(pending.length);
       forceRender((n) => n + 1);
     })();
     return () => {
@@ -162,6 +194,17 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     forceRender((n) => n + 1);
   }, [cacheRegistros]);
 
+  const reconcileQueuedRegistro = useCallback(async (item: QueueItem, registro?: Registro) => {
+    const confirmed = registro || queuedRegistro(item);
+    const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${item.evento_id}`, null)) || [];
+    const next = [confirmed, ...cached.filter((r) => r.cedula !== item.cedula)].slice(0, REGISTROS_RECENT_LIMIT);
+    await cacheRegistros(item.evento_id, next);
+    if (eventoId !== item.evento_id) return;
+    cedulasSetRef.current.add(item.cedula);
+    setRegistros(next);
+    forceRender((n) => n + 1);
+  }, [cacheRegistros, eventoId]);
+
   const refreshRegistros = useCallback(async () => {
     if (!eventoId) return;
     try {
@@ -171,14 +214,19 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         api.registroCedulas(eventoId),
       ]);
       const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
+      const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
+        .filter((item) => item.evento_id === eventoId);
+      pending.forEach((item) => set.add(item.cedula));
       cedulasSetRef.current = set;
-      setRegistros(list as Registro[]);
-      await cacheRegistros(eventoId, list as Registro[]);
+      const visible = [...pending.map(queuedRegistro), ...(list as Registro[]).filter((r) => !pending.some((item) => item.cedula === r.cedula))]
+        .slice(0, REGISTROS_RECENT_LIMIT);
+      setRegistros(visible);
+      await cacheRegistros(eventoId, visible);
       setTotalRegistros(Number(est.total ?? list.length));
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
-      // ignore
+      // Preserve the current local registry while offline.
     }
   }, [eventoId, cacheRegistros]);
 
@@ -269,47 +317,57 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
   // Offline queue flusher
   const flushQueue = useCallback(async () => {
-    const q = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
-    if (!q.length) {
-      setQueueSize(0);
-      return;
-    }
-    const remaining: QueueItem[] = [];
-    for (const item of q) {
-      try {
-        await api.escanear(
-          {
-            cedula: item.cedula,
-            evento_id: item.evento_id,
-            device_id: item.device_id,
-            timestamp: item.timestamp,
-            nonce: item.nonce,
-            nombre: item.nombre,
-            sede: item.sede,
-            municipio: item.municipio,
-            cargo: item.cargo,
-            raw_barcode: item.raw_barcode || "",
-            primer_apellido: item.primer_apellido || "",
-            segundo_apellido: item.segundo_apellido || "",
-            nombres: item.nombres || "",
-            genero: item.genero || "",
-            fecha_nacimiento: item.fecha_nacimiento || "",
-            fecha_expiracion: item.fecha_expiracion || "",
-            tipo_sangre: item.tipo_sangre || "",
-          },
-          item.idempotency_key,
-        );
-      } catch (err: any) {
-        if (err?.status === 409) {
-          // already exists, drop
-        } else if (item.attempts < 5) {
-          remaining.push({ ...item, attempts: item.attempts + 1 });
+    if (isFlushingRef.current) return;
+    isFlushingRef.current = true;
+    try {
+    while (true) {
+      const q = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
+      setQueueSize(q.length);
+      const now = Date.now();
+      const due = q.filter((item) => !item.next_attempt_at || item.next_attempt_at <= now).slice(0, 3);
+      if (!due.length) break;
+      let persistenceFailed = false;
+      await Promise.all(due.map(async (item) => {
+        try {
+          const result = await api.escanear({
+            cedula: item.cedula, evento_id: item.evento_id, device_id: item.device_id,
+            timestamp: item.timestamp, nonce: item.nonce, nombre: item.nombre, sede: item.sede,
+            municipio: item.municipio, cargo: item.cargo, raw_barcode: item.raw_barcode || "",
+            primer_apellido: item.primer_apellido || "", segundo_apellido: item.segundo_apellido || "",
+            nombres: item.nombres || "", genero: item.genero || "", fecha_nacimiento: item.fecha_nacimiento || "",
+            fecha_expiracion: item.fecha_expiracion || "", tipo_sangre: item.tipo_sangre || "",
+          }, item.idempotency_key);
+          await reconcileQueuedRegistro(item, (result?.registro || result?.registro_existente) as Registro | undefined);
+          await withQueueLock(async () => {
+            const latest = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
+            const saved = await storage.setItem(QUEUE_KEY, latest.filter((entry) => entry.idempotency_key !== item.idempotency_key));
+            if (saved) setQueueSize(Math.max(0, latest.length - 1));
+            else persistenceFailed = true;
+          });
+        } catch (err: any) {
+          let confirmed: Registro | undefined;
+          if (err?.status === 409) confirmed = err?.detail?.registro_existente as Registro | undefined;
+          if (err?.status === 409) await reconcileQueuedRegistro(item, confirmed);
+          await withQueueLock(async () => {
+            const latest = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
+            const saved = await storage.setItem(QUEUE_KEY, err?.status === 409
+              ? latest.filter((entry) => entry.idempotency_key !== item.idempotency_key)
+              : latest.map((entry) => entry.idempotency_key === item.idempotency_key
+                ? { ...entry, attempts: (entry.attempts || 0) + 1, next_attempt_at: Date.now() + retryDelay((entry.attempts || 0) + 1), last_error: scanErrorMessage(err, "Error de sincronización") }
+                : entry));
+            if (saved) setQueueSize(err?.status === 409 ? Math.max(0, latest.length - 1) : latest.length);
+            else persistenceFailed = true;
+          });
         }
-      }
+      }));
+      if (persistenceFailed) break;
+      // Small pause limits reconnect bursts while continuously draining backlog.
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    await storage.setItem(QUEUE_KEY, remaining);
-    setQueueSize(remaining.length);
-  }, []);
+    } finally {
+      isFlushingRef.current = false;
+    }
+  }, [reconcileQueuedRegistro]);
 
   useEffect(() => {
     if (wsStatus === "online") {
@@ -336,6 +394,11 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     setLastDuplicate(null);
     setLastSuccess(null);
     setTotalRegistros(0);
+    const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
+      .filter((item) => item.evento_id === id);
+    setQueueSize(pending.length);
+    cedulasSetRef.current = new Set(pending.map((item) => item.cedula));
+    setRegistros(pending.map(queuedRegistro));
     // Load initial
     try {
       const [list, est, cedulas] = await Promise.all([
@@ -344,9 +407,12 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         api.registroCedulas(id),
       ]);
       const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
+      pending.forEach((item) => set.add(item.cedula));
       cedulasSetRef.current = set;
-      setRegistros(list as Registro[]);
-      await cacheRegistros(id, list as Registro[]);
+      const visible = [...pending.map(queuedRegistro), ...(list as Registro[]).filter((r) => !pending.some((item) => item.cedula === r.cedula))]
+        .slice(0, REGISTROS_RECENT_LIMIT);
+      setRegistros(visible);
+      await cacheRegistros(id, visible);
       setTotalRegistros(Number(est.total ?? list.length));
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
@@ -388,6 +454,12 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         return { ok: false, duplicate: true, mensaje: `Atención: ya registrado: ${cedula}` };
       }
 
+      const existingQueue = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
+      if (existingQueue.some((item) => item.evento_id === eventoId && item.cedula === cedula)) {
+        setLastDuplicate({ cedula, ts: Date.now() });
+        return { ok: false, duplicate: true, mensaje: `Atención: ${cedula} ya está guardada en la cola de este dispositivo` };
+      }
+
       const nonce = newNonce();
       const ts = Date.now();
       const device_id = deviceIdRef.current || (await getDeviceId());
@@ -413,71 +485,30 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         tipo_sangre: (extras as any).tipo_sangre || "",
       };
 
-      try {
-        const res = await api.escanear(payload, idempotency_key);
-        if (res?.ok && res.registro) {
-          addRegistro(res.registro);
-          setLastSuccess({ cedula, ts: Date.now() });
-          return { ok: true, mensaje: "Registrado correctamente", registro: res.registro };
-        }
-        return { ok: false, mensaje: res?.mensaje || "Error" };
-      } catch (err: any) {
-        if (err?.status === 409) {
-          // Duplicado servidor
-          const existing = err?.detail?.registro_existente;
-          if (existing) {
-            addRegistro(existing as Registro, false);
-          } else {
-            cedulasSetRef.current.add(cedula);
-          }
-          setLastDuplicate({ cedula, ts: Date.now() });
-          setDuplicadosBloqueados((n) => n + 1);
-          return { ok: false, duplicate: true, mensaje: `Atención: ya registrado: ${cedula}` };
-        }
-        if (!shouldQueueAfterError(err)) {
-          return { ok: false, mensaje: scanErrorMessage(err, "No se pudo registrar") };
-        }
-
-        // Sin conexion o backend temporalmente no disponible -> encolar
+      // Write-ahead queue: durably store each scan before the first network call.
+      const persisted = await withQueueLock(async () => {
         const q = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
+        if (q.some((item) => item.evento_id === eventoId && item.cedula === cedula)) return -1;
         q.push({ ...payload, idempotency_key, attempts: 0 });
-        await storage.setItem(QUEUE_KEY, q);
-        setQueueSize(q.length);
-        // Optimistic local add
-        addRegistro({
-          id: `local_${nonce}`,
-          evento_id: eventoId,
-          cedula,
-          nombre: payload.nombre,
-          sede: payload.sede,
-          municipio: payload.municipio,
-          cargo: payload.cargo,
-          device_id,
-          operator_email: "(pendiente)",
-          timestamp: ts,
-          created_at: new Date().toISOString(),
-        });
-        setLastSuccess({ cedula, ts: Date.now() });
-        return {
-          ok: true,
-          mensaje: "En cola de sincronizacion. Se enviara cuando vuelva la conexion.",
-          registro: {
-            id: `local_${nonce}`,
-            evento_id: eventoId,
-            cedula,
-            nombre: payload.nombre,
-            sede: payload.sede,
-            municipio: payload.municipio,
-            cargo: payload.cargo,
-            device_id,
-            operator_email: "(pendiente)",
-            timestamp: ts,
-            created_at: new Date().toISOString(),
-          },
-        };
+        return await storage.setItem(QUEUE_KEY, q) ? q.length : -2;
+      });
+      if (persisted === -1) {
+        return { ok: false, duplicate: true, mensaje: `Atención: ${cedula} ya está guardada en la cola de este dispositivo` };
       }
+      if (persisted < 0) {
+        return { ok: false, mensaje: "No se pudo guardar en este teléfono. No marques este escaneo como registrado; informa al administrador." };
+      }
+      setQueueSize(persisted);
+
+      const local = queuedRegistro({ ...payload, idempotency_key, attempts: 0 });
+      addRegistro(local);
+      setLastSuccess({ cedula, ts: Date.now() });
+      // Network delivery runs in the background; the camera is immediately
+      // available for the next person. The write-ahead copy is already durable.
+      void flushQueue();
+      return { ok: true, mensaje: "Guardado en este teléfono; sincronizando con el servidor.", registro: local };
     },
-    [eventoId, addRegistro],
+    [eventoId, addRegistro, flushQueue],
   );
 
   // Load queue size at startup

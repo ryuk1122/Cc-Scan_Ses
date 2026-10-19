@@ -243,7 +243,7 @@ export default function AdminScreen() {
       const file = res.assets[0];
       setImportBusy(true);
       const out = await api.uploadAfiliados({ uri: file.uri, name: file.name, mimeType: file.mimeType });
-      Alert.alert("Importación completa", `Total: ${out.total}\nNuevos: ${out.insertados}\nActualizados: ${out.actualizados}`);
+      Alert.alert("Importación completa", `Total: ${out.total}\nCon municipio: ${out.con_municipio ?? "no informado"}\nNuevos: ${out.insertados}\nActualizados: ${out.actualizados}`);
       loadAfiliados();
     } catch (e: any) {
       Alert.alert("Error al importar", errorMessage(e, "No se pudo importar"));
@@ -605,7 +605,7 @@ export default function AdminScreen() {
                   <View style={{ flex: 1 }}>
                     <Text style={styles.afCed}>{item.cedula}</Text>
                     <Text style={styles.afName} numberOfLines={1}>{cleanDisplayName(item.nombre) || "(sin nombre)"}</Text>
-                    <Text style={styles.afMeta} numberOfLines={1}>{item.cargo}{item.sede ? ` · ${item.sede}` : ""}</Text>
+                    <Text style={styles.afMeta} numberOfLines={1}>{item.cargo}{item.sede ? ` · ${item.sede}` : ""}{item.municipio ? ` · ${item.municipio}` : " · Sin municipio"}</Text>
                   </View>
                   <TouchableOpacity onPress={() => setEditing(item)} style={styles.afAction}>
                     <Ionicons name="create-outline" size={18} color={theme.brand} />
