@@ -534,6 +534,17 @@ async def get_afiliado(cedula: str, current=Depends(get_current_user)):
     doc = await db.afiliados.find_one({"cedula": ced}, {"_id": 0})
     if not doc:
         return {"encontrado": False, "cedula": ced}
+    # Compatibilidad con bases importadas antes de normalizar los encabezados.
+    if not str(doc.get("municipio") or "").strip():
+        for key in (
+            "municipio_sede", "municipio_cedula", "municipio_residencia",
+            "municipio_laboral", "ciudad", "ciudad_trabajo", "localidad",
+            "city", "municipality",
+        ):
+            value = str(doc.get(key) or "").strip()
+            if value:
+                doc["municipio"] = value
+                break
     return {"encontrado": True, "afiliado": doc}
 
 
@@ -687,7 +698,9 @@ async def import_afiliados(file: UploadFile = File(...), current=Depends(require
         raise HTTPException(status_code=400, detail="No se encontraron filas válidas con cédula")
 
     inserted = updated = 0
-    BATCH = 500
+    # El Excel de afiliados suele tener decenas de miles de filas. Reducir
+    # los viajes a Mongo acelera mucho la importación sin cambiar los datos.
+    BATCH = 5000
     for i in range(0, len(items), BATCH):
         chunk = items[i:i + BATCH]
         ops = [
@@ -704,6 +717,7 @@ async def import_afiliados(file: UploadFile = File(...), current=Depends(require
     return {
         "ok": True,
         "total": len(items),
+        "con_municipio": sum(1 for item in items if str(item.get("municipio") or "").strip()),
         "duplicados_omitidos": raw_total - len(items),
         "insertados": inserted,
         "actualizados": updated,
@@ -964,7 +978,14 @@ def _ingest_afiliado_row(row: Dict[str, str], items: List[Dict[str, Any]]) -> No
         "cedula":    ced,
         "nombre":    nombre,
         "sede":      pick("sede", "institucion", "institución", "institucion_educativa", "institucion educativa", "establecimiento", "establecimiento educativo", "colegio", "ie"),
-        "municipio": pick("municipio", "municipio sede", "mun. cedula", "mun. cédula", "mun_cedula", "municipio cedula", "ciudad", "ciudad_trabajo", "ciudad trabajo"),
+        "municipio": pick(
+            "municipio", "municipio sede", "municipio_sede", "municipio cedula", "municipio_cedula",
+            "municipio residencia", "municipio de residencia", "municipio_residencia",
+            "municipio laboral", "municipio de trabajo", "municipio_laboral",
+            "municipio labora", "municipio donde labora", "municipio_labora",
+            "mun. cedula", "mun. cédula", "mun_cedula", "ciudad", "ciudad residencia",
+            "ciudad trabajo", "ciudad_trabajo", "localidad", "lugar de residencia", "city", "municipality",
+        ),
         "zona":      pick("zona", "zona educativa", "region", "región"),
         "cargo":     pick("cargo", "rol", "perfil", "tipo cargo", "tipo de cargo"),
         "titulo":    pick("titulo", "título", "grado", "nivel"),

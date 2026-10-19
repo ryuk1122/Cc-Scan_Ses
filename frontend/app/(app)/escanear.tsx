@@ -76,6 +76,7 @@ type ServerParsedCedula = Partial<Pick<
 >>;
 type OcrReadResult = { raw: string; serverParsed?: ServerParsedCedula };
 type PrintPayload = { nombre: string; cargo: string; municipio: string; sede?: string };
+type ScanFeedback = { kind: "ok" | "dup" | "err"; title: string; detail: string; cedula?: string; municipio?: string };
 
 function scannedPayload(raw?: string | null, data?: string | null): string {
   for (const value of [raw, data]) {
@@ -107,10 +108,25 @@ function cleanCedulaNumber(value: string | null | undefined): string {
 
 function normalizeAfiliadoData(response: any): PrintPayload {
   const afiliado = response?.afiliado || (response?.encontrado ? response : null) || {};
+  const location = afiliado.ubicacion || afiliado.location || afiliado.direccion || {};
+  const municipio = [
+    afiliado.municipio,
+    afiliado.municipio_sede,
+    afiliado.municipio_cedula,
+    afiliado.municipio_residencia,
+    afiliado.municipio_laboral,
+    afiliado.ciudad,
+    afiliado.ciudad_trabajo,
+    afiliado.localidad,
+    afiliado.city,
+    location.municipio,
+    location.ciudad,
+    location.city,
+  ].find((value) => String(value || "").trim());
   return {
     nombre: afiliado.nombre_completo || afiliado.nombre || "",
     cargo: afiliado.cargo || "",
-    municipio: afiliado.municipio || "",
+    municipio: String(municipio || "").trim(),
     sede: afiliado.sede || "",
   };
 }
@@ -283,6 +299,8 @@ export default function EscanearScreen() {
 
   const [permission, requestPermission] = useCameraPermissions();
   const [toast, setToast] = useState<{ kind: "ok" | "dup" | "err"; text: string } | null>(null);
+  const [scanFeedback, setScanFeedback] = useState<ScanFeedback | null>(null);
+  const lookupMunicipioRef = useRef<{ cedula: string; municipio: string } | null>(null);
   const lastScanRef = useRef<{ value: string; at: number } | null>(null);
   const lastRawScanRef = useRef<{ value: string; at: number } | null>(null);
   const scanBusyRef = useRef(false);
@@ -376,7 +394,7 @@ export default function EscanearScreen() {
     try {
       const r = await api.lookupAfiliado(cedula);
       if (sequence !== lookupSequence.current) return;
-      setPreview({ ...r, afiliado: { ...r.afiliado, ...normalizeAfiliadoData(r) } });
+      setPreview({ cedula, ...r, afiliado: { ...r.afiliado, ...normalizeAfiliadoData(r) } });
     } catch {
       if (sequence === lookupSequence.current) setPreview({ encontrado: false, cedula, error: true });
     } finally {
@@ -451,6 +469,13 @@ export default function EscanearScreen() {
         if (!b64) return { raw: "" };
         const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz });
         if (res.ok && res.cedula) {
+          const isMrz = res.source === "mrz_ocr" || res.format === "MRZ";
+          const mrzValid = res.mrz_valido ?? res.parsed?.mrz_valido;
+          // The OCR service can return a best-effort MRZ even when its check
+          // digits fail. Do not register a potentially misread identity.
+          if (options.preferMrz && isMrz && mrzValid !== true) {
+            return { raw: "" };
+          }
           const raw = res.raw || res.raw_mrz?.join("\n") || res.cedula;
           const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
           return { raw, serverParsed };
@@ -519,6 +544,7 @@ export default function EscanearScreen() {
           }
         }
         if (!cedula) {
+          setScanFeedback({ kind: "err", title: "NO CONFIRMADA", detail: "No se encontró un número de cédula legible." });
           showToast("err", "No pude confirmar la cédula. Usa la camara completa o manual.");
           return;
         }
@@ -532,37 +558,38 @@ export default function EscanearScreen() {
         const previewSequence = ++lookupSequence.current;
         setPreview(null);
         setPreviewLoading(true);
-        let lookupPrint: PrintPayload = { nombre: "", cargo: "", municipio: "" };
-        let esAfiliado: boolean | undefined;
-        try {
-          const afiliadoResponse = await api.lookupAfiliado(cedula);
-          esAfiliado = !!afiliadoResponse?.encontrado;
-          lookupPrint = normalizeAfiliadoData(afiliadoResponse);
-          if (previewSequence === lookupSequence.current) {
-            setPreview({ ...afiliadoResponse, afiliado: { ...afiliadoResponse.afiliado, ...lookupPrint } });
-          }
-        } catch {
-          if (previewSequence === lookupSequence.current) {
-            setPreview({ encontrado: false, cedula, error: true });
-          }
-        } finally {
-          if (previewSequence === lookupSequence.current) {
-            setPreviewLoading(false);
-          }
-        }
-        const printFallback: PrintPayload = {
-          nombre: lookupPrint.nombre || parsedFullName(parsed),
-          cargo: lookupPrint.cargo,
-          municipio: lookupPrint.municipio,
-          sede: lookupPrint.sede,
-        };
+        void api.lookupAfiliado(cedula)
+          .then((afiliadoResponse) => {
+            const lookupPrint = normalizeAfiliadoData(afiliadoResponse);
+            lookupMunicipioRef.current = {
+              cedula,
+              municipio: lookupPrint.municipio || "No registrado en la base",
+            };
+            if (previewSequence === lookupSequence.current) {
+              setPreview({ cedula, ...afiliadoResponse, afiliado: { ...afiliadoResponse.afiliado, ...lookupPrint } });
+              setScanFeedback((current) => current?.cedula === cedula
+                ? { ...current, municipio: lookupPrint.municipio || "No registrado en la base" }
+                : current);
+            }
+          })
+          .catch(() => {
+            lookupMunicipioRef.current = { cedula, municipio: "Sin verificar" };
+            if (previewSequence === lookupSequence.current) {
+              setPreview({ encontrado: false, cedula, error: true });
+              setScanFeedback((current) => current?.cedula === cedula
+                ? { ...current, municipio: "Sin verificar" }
+                : current);
+            }
+          })
+          .finally(() => {
+            if (previewSequence === lookupSequence.current) setPreviewLoading(false);
+          });
 
         const res = await scan(cedula, {
-          nombre: printFallback.nombre,
-          cargo: printFallback.cargo,
-          municipio: printFallback.municipio,
-          sede: printFallback.sede,
-          es_afiliado: esAfiliado,
+          nombre: parsedFullName(parsed),
+          cargo: "",
+          municipio: "",
+          sede: "",
           raw_barcode: rawToUse,
           primer_apellido: parsed.primer_apellido,
           segundo_apellido: parsed.segundo_apellido,
@@ -573,13 +600,31 @@ export default function EscanearScreen() {
           tipo_sangre: parsed.tipo_sangre,
         } as any);
         if (res.ok) {
+          const pendingSync = res.mensaje.includes("pendiente") || res.mensaje.includes("sincronizando");
+          const municipio = lookupMunicipioRef.current?.cedula === cedula
+            ? lookupMunicipioRef.current.municipio
+            : "Consultando…";
+          setScanFeedback({
+            kind: "ok",
+            title: "REGISTRO CONFIRMADO",
+            cedula,
+            municipio,
+            detail: pendingSync ? "Guardada en este teléfono · pendiente de sincronización" : "Guardada y sincronizada correctamente",
+          });
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          showToast("ok", `Cédula ${cedula} registrada`);
+          showToast("ok", pendingSync
+            ? `Cédula ${cedula}: guardada en el teléfono; falta sincronizar`
+            : `Cédula ${cedula} registrada`);
         } else if (res.duplicate) {
+          const municipio = lookupMunicipioRef.current?.cedula === cedula
+            ? lookupMunicipioRef.current.municipio
+            : "Consultando…";
+          setScanFeedback({ kind: "dup", title: "REGISTRO DUPLICADO", cedula, municipio, detail: "Esta cédula ya fue registrada para el evento." });
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           flashDuplicate();
           showToast("dup", `Atención: ${cedula} ya registrada`);
         } else {
+          setScanFeedback({ kind: "err", title: "NO CONFIRMADA", cedula, municipio: "Sin verificar", detail: res.mensaje || "No se pudo guardar el registro." });
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           showToast("err", res.mensaje);
         }
@@ -612,9 +657,9 @@ export default function EscanearScreen() {
       }
 
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      showToast("err", "MRZ no detectado. Acerca la cedula y toca otra vez.");
+      showToast("err", "MRZ no legible o sin dígitos de control válidos. Reintenta la foto o usa QR/PDF417.");
     } catch {
-      showToast("err", "MRZ no detectado. Intenta de nuevo.");
+      showToast("err", "No pude validar la MRZ. Reintenta la foto o usa QR/PDF417.");
     } finally {
       cameraReadBusy.current = false;
     }
@@ -712,6 +757,33 @@ export default function EscanearScreen() {
         </TouchableOpacity>
       </View>
 
+      {scanFeedback && (
+        <View
+          accessibilityLiveRegion="polite"
+          testID="scan-confirmation-card"
+          style={[styles.confirmationCard, styles[`confirmation${scanFeedback.kind}`]]}
+        >
+          <Ionicons
+            name={scanFeedback.kind === "ok" ? "checkmark-circle" : scanFeedback.kind === "dup" ? "alert-circle" : "close-circle"}
+            size={34}
+            color="#fff"
+          />
+          <View style={styles.confirmationCopy}>
+            <Text style={styles.confirmationTitle}>{scanFeedback.title}</Text>
+            {!!scanFeedback.cedula && <Text style={styles.confirmationCedula}>Documento: CC {scanFeedback.cedula}</Text>}
+            {!!scanFeedback.municipio && <Text style={styles.confirmationMunicipio}>Municipio: {scanFeedback.municipio}</Text>}
+            <Text style={styles.confirmationDetail}>{scanFeedback.detail}</Text>
+          </View>
+          <TouchableOpacity
+            accessibilityLabel="Cerrar confirmación"
+            onPress={() => setScanFeedback(null)}
+            style={styles.confirmationClose}
+          >
+            <Ionicons name="close" size={20} color="rgba(255,255,255,0.8)" />
+          </TouchableOpacity>
+        </View>
+      )}
+
       {mode === "camera" && isFocused ? (
         <View style={styles.cameraWrap} testID="scanner-camera-view">
           {!permission ? (
@@ -750,17 +822,7 @@ export default function EscanearScreen() {
     lastRawScanRef.current = { value: normalized, at: now };
     const hasDirectCedula = !!extractCedulaFromCameraPayload(normalized);
     if (!hasDirectCedula) {
-      // DEBUG TEMPORAL: confirma si el QR trae texto usable o va cifrado/binario.
-      // Quita este bloque (o cambia a __DEV__) cuando termines de diagnosticar.
-      console.log("[scan] barcode sin cedula extraible", {
-        type,
-        length: payload.length,
-        preview: payload.slice(0, 60),
-        isPrintableAscii: /^[\x20-\x7E]*$/.test(payload),
-      });
-      if (type === "qr") {
-        showToast("err", "QR detectado pero sin cédula legible. Usa PDF417, MRZ o manual.");
-      }
+      if (type === "qr") showToast("err", "QR detectado pero sin cédula legible. Usa PDF417, MRZ o manual.");
       return;
     }
     void handleScan(normalized, { skipBarcodeFallback: true });
@@ -832,8 +894,18 @@ export default function EscanearScreen() {
 
       {(previewLoading || preview) && (
         <View accessibilityLiveRegion="polite" testID="docente-result" style={[styles.teacherCard, { backgroundColor: previewLoading || preview?.error ? "#334155" : preview?.encontrado ? "#14532d" : "#991b1b" }]}>
-          <Text style={styles.teacherAnswer}>{previewLoading ? "CONSULTANDO DOCENTE…" : preview?.error ? "DOCENTE: SIN VERIFICAR" : preview?.encontrado ? "DOCENTE: SÍ" : "DOCENTE: NO"}</Text>
-          {!!preview && <Text style={styles.teacherDetail}>CC {preview.cedula}{preview.afiliado?.nombre ? " · " + preview.afiliado.nombre : ""}</Text>}
+          <View style={styles.teacherHeader}>
+            {!previewLoading && (
+              <Ionicons
+                name={preview?.encontrado ? "checkmark-circle" : preview?.error ? "help-circle" : "close-circle"}
+                size={38}
+                color="#fff"
+              />
+            )}
+            <Text style={styles.teacherAnswer}>{previewLoading ? "CONSULTANDO DOCENTE…" : preview?.error ? "DOCENTE: SIN VERIFICAR" : preview?.encontrado ? "DOCENTE: SÍ" : "DOCENTE: NO"}</Text>
+          </View>
+          {!!preview && <Text style={styles.teacherDocument}>Documento: CC {preview.cedula}</Text>}
+          {!!preview?.afiliado?.nombre && <Text style={styles.teacherName} numberOfLines={2}>{preview.afiliado.nombre}</Text>}
           {!previewLoading && <Text style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
           {!previewLoading && !preview?.error && preview?.encontrado && (
             <Text
@@ -856,8 +928,8 @@ export default function EscanearScreen() {
           </View>
           <View style={styles.documentPreviewGrid}>
             <View style={styles.documentPreviewCell}>
-              <Text style={styles.documentPreviewLabel}>CC</Text>
-              <Text style={styles.documentPreviewValue}>{documentPreview.cedula}</Text>
+              <Text style={styles.documentPreviewLabel}>Número de documento</Text>
+              <Text style={styles.documentPreviewValue}>CC {documentPreview.cedula || "No detectado"}</Text>
             </View>
             <View style={styles.documentPreviewCell}>
               <Text style={styles.documentPreviewLabel}>Fecha</Text>
@@ -915,8 +987,11 @@ export default function EscanearScreen() {
 }
 
 const styles = StyleSheet.create({
-  teacherCard: { marginHorizontal: 16, marginVertical: 8, padding: 16, borderRadius: 16, gap: 5 },
-  teacherAnswer: { color: "#fff", fontSize: 30, fontWeight: "900" },
+  teacherCard: { marginHorizontal: 16, marginVertical: 8, padding: 16, borderRadius: 16, gap: 7 },
+  teacherHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
+  teacherAnswer: { color: "#fff", fontSize: 30, fontWeight: "900", flexShrink: 1 },
+  teacherDocument: { color: "rgba(255,255,255,0.92)", fontSize: 19, fontWeight: "800", letterSpacing: 0.2 },
+  teacherName: { color: "#fff", fontSize: 25, lineHeight: 30, fontWeight: "900", marginTop: 1 },
   teacherDetail: { color: "#fff", fontSize: 15 },
   teacherMunicipality: { color: "#fff", fontSize: 20, fontWeight: "700" },
   aportesStatus: { color: "#fde68a", fontSize: 18, fontWeight: "900", marginTop: 7, letterSpacing: 0.5 },
@@ -1009,6 +1084,16 @@ const styles = StyleSheet.create({
   recentField: { color: theme.textDisabled, fontSize: 10, marginTop: 1 },
   toast: { position: "absolute", top: 80, left: 20, right: 20, padding: 14, borderRadius: 14, borderWidth: 1, zIndex: 200 },
   toastText: { color: theme.text, fontWeight: "800", fontSize: 14, textAlign: "center" },
+  confirmationCard: { marginHorizontal: 14, marginBottom: 8, padding: 14, borderRadius: 14, flexDirection: "row", alignItems: "center", gap: 11, borderWidth: 1, borderColor: "rgba(255,255,255,0.24)" },
+  confirmationok: { backgroundColor: "#16803c" },
+  confirmationdup: { backgroundColor: "#b45309" },
+  confirmationerr: { backgroundColor: "#b42318" },
+  confirmationCopy: { flex: 1, gap: 2 },
+  confirmationTitle: { color: "#fff", fontSize: 17, fontWeight: "900", letterSpacing: 0.3 },
+  confirmationCedula: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  confirmationMunicipio: { color: "#fff", fontSize: 15, fontWeight: "700" },
+  confirmationDetail: { color: "rgba(255,255,255,0.9)", fontSize: 12, lineHeight: 17 },
+  confirmationClose: { padding: 4 },
   emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32, gap: 12 },
   emptyTitle: { color: theme.text, fontSize: 20, fontWeight: "800" },
   emptySub: { color: theme.textSecondary, textAlign: "center" },

@@ -27,7 +27,7 @@ export async function clearToken(): Promise<void> {
   await storage.secureRemove(TOKEN_KEY);
 }
 
-async function request<T>(path: string, options: RequestInit = {}, withAuth = true): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}, withAuth = true, timeoutMs = API_TIMEOUT_MS): Promise<T> {
   if (!BASE) {
     throw {
       status: 0,
@@ -44,7 +44,7 @@ async function request<T>(path: string, options: RequestInit = {}, withAuth = tr
   }
   const url = `${BASE}/api${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(url, { ...options, headers, signal: controller.signal });
@@ -85,7 +85,9 @@ export const api = {
   auditoria: (id: string) => request<any[]>(`/eventos/${id}/auditoria`),
 
   // Afiliados
-  lookupAfiliado: (cedula: string) => request<any>(`/afiliados/${encodeURIComponent(cedula)}`),
+  // Scanner lookups are supplementary; cap their wait so a slow/offline API
+  // cannot hold the camera workflow hostage.
+  lookupAfiliado: (cedula: string) => request<any>(`/afiliados/${encodeURIComponent(cedula)}`, {}, true, 8000),
   listAfiliados: (q = "", limit = 50, skip = 0) =>
     request<{ total: number; items: any[] }>(`/admin/afiliados?q=${encodeURIComponent(q)}&limit=${limit}&skip=${skip}`),
   afiliadosStats: () => request<{ total: number }>("/admin/afiliados/stats"),
@@ -105,7 +107,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
       headers: { "Idempotency-Key": idempotencyKey },
-    }),
+    }, true, 5000),
 
   // OCR del frente
   ocrCedula: (imageBase64: string, options: { forceGemini?: boolean } = {}) =>
@@ -117,6 +119,8 @@ export const api = {
     request<{ ok: boolean; cedula: string; raw: string; parsed?: any; format?: string; source?: string; raw_mrz?: string[]; mrz_valido?: boolean; candidates?: string[]; afiliado: any; error?: string }>(
       "/barcode/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64, prefer_mrz: !!options.preferMrz }) },
+      true,
+      15000,
     ),
 
   // Admin registros
