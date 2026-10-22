@@ -908,12 +908,12 @@ export default function EscanearScreen() {
           {!!preview && <Text style={styles.teacherDocument}>Documento: CC {preview.cedula}</Text>}
           {!!preview?.afiliado?.nombre && <Text style={styles.teacherName} numberOfLines={2}>{preview.afiliado.nombre}</Text>}
           {!previewLoading && <Text style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
-          {!previewLoading && !preview?.error && preview?.encontrado && (
+          {!previewLoading && !preview?.error && preview && (
             <Text
               testID="aportes-status"
-              style={[styles.aportesStatus, { color: preview?.afiliado?.aportes_al_dia === true ? "#86efac" : preview?.afiliado?.aportes_al_dia === false ? "#fecaca" : "#fde68a" }]}
+              style={[styles.aportesStatus, { color: preview.encontrado ? "#86efac" : "#fecaca" }]}
             >
-              APORTES: {preview?.afiliado?.aportes_al_dia === true ? "AL DÍA" : preview?.afiliado?.aportes_al_dia === false ? "NO AL DÍA" : preview?.afiliado?.estado_aportes ? String(preview.afiliado.estado_aportes).toUpperCase() : "SIN INFORMACIÓN"}
+              {preview.encontrado ? "INSCRITO" : "NO INSCRITO"}
             </Text>
           )}
           {preview?.error && <Text style={styles.teacherDetail}>No se pudo consultar la base. Comprueba la conexión.</Text>}
