@@ -279,6 +279,7 @@ export default function EscanearScreen() {
     eventoNombre,
     registros,
     totalRegistros,
+    misRegistros,
     scan,
     wsStatus,
     activos,
@@ -732,8 +733,8 @@ export default function EscanearScreen() {
             <Ionicons name="swap-horizontal" size={18} color={theme.text} />
           </TouchableOpacity>
           <View style={styles.counterPill}>
-            <Text testID="scan-counter" style={styles.counterValue}>{totalRegistros}</Text>
-            <Text style={styles.counterLabel}>escaneadas</Text>
+            <Text testID="scan-counter" style={styles.counterValue}>{misRegistros}</Text>
+            <Text style={styles.counterLabel}>mis escaneos</Text>
           </View>
         </View>
       </View>

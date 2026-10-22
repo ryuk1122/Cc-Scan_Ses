@@ -80,6 +80,8 @@ export const api = {
   estado: (id: string) => request<any>(`/eventos/${id}/estado`),
   registros: (id: string, limit = 500, skip = 0) =>
     request<any[]>(`/eventos/${encodeURIComponent(id)}/registros?limit=${limit}&skip=${skip}`),
+  misRegistros: (id: string) =>
+    request<{ total: number }>(`/eventos/${encodeURIComponent(id)}/mis-registros`),
   registroCedulas: (id: string) =>
     request<string[]>(`/eventos/${encodeURIComponent(id)}/cedulas`),
   auditoria: (id: string) => request<any[]>(`/eventos/${id}/auditoria`),

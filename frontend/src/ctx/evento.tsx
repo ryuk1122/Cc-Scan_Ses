@@ -40,6 +40,7 @@ type EventoCtxValue = {
   eventoNombre: string;
   registros: Registro[];
   totalRegistros: number;
+  misRegistros: number;
   cedulasSet: Set<string>;
   wsStatus: "idle" | "connecting" | "online" | "offline";
   activos: number;
@@ -79,6 +80,7 @@ type QueueItem = {
   municipio: string;
   cargo: string;
   raw_barcode?: string;
+  operator_email?: string;
   primer_apellido?: string;
   segundo_apellido?: string;
   nombres?: string;
@@ -102,7 +104,7 @@ function queuedRegistro(item: QueueItem): Registro {
     municipio: item.municipio,
     cargo: item.cargo,
     device_id: item.device_id,
-    operator_email: "(pendiente)",
+    operator_email: item.operator_email || "(pendiente)",
     timestamp: item.timestamp,
     created_at: new Date(item.timestamp).toISOString(),
   };
@@ -129,11 +131,12 @@ function scanErrorMessage(err: any, fallback: string): string {
 }
 
 export function EventoProvider({ children }: { children: ReactNode }) {
-  const { token } = useSession();
+  const { token, user } = useSession();
   const [eventoId, setEventoId] = useState<string | null>(null);
   const [eventoNombre, setEventoNombre] = useState("");
   const [registros, setRegistros] = useState<Registro[]>([]);
   const [totalRegistros, setTotalRegistros] = useState(0);
+  const [misRegistros, setMisRegistros] = useState(0);
   const cedulasSetRef = useRef<Set<string>>(new Set());
   const [, forceRender] = useState(0);
   const [wsStatus, setWsStatus] = useState<EventoCtxValue["wsStatus"]>("idle");
@@ -172,6 +175,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       cedulasSetRef.current = new Set([...cached.map((r) => r.cedula), ...pending.map((r) => r.cedula)]);
       setRegistros(visible);
       setTotalRegistros(cached.length);
+      setMisRegistros(cached.filter((r) => r.operator_email === user?.email).length + pending.filter((item) => item.operator_email === user?.email).length);
       setQueueSize(pending.length);
       forceRender((n) => n + 1);
     })();
@@ -208,10 +212,11 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const refreshRegistros = useCallback(async () => {
     if (!eventoId) return;
     try {
-      const [list, est, cedulas] = await Promise.all([
+      const [list, est, cedulas, mine] = await Promise.all([
         api.registros(eventoId, REGISTROS_RECENT_LIMIT, 0),
         api.estado(eventoId),
         api.registroCedulas(eventoId),
+        api.misRegistros(eventoId),
       ]);
       const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
       const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
@@ -223,12 +228,17 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       setRegistros(visible);
       await cacheRegistros(eventoId, visible);
       setTotalRegistros(Number(est.total ?? list.length));
+      setMisRegistros(Number(mine.total ?? 0) + pending.filter((item) => item.operator_email === user?.email).length);
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
       // Preserve the current local registry while offline.
+      const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${eventoId}`, null)) || [];
+      const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
+        .filter((item) => item.evento_id === eventoId);
+      setMisRegistros(cached.filter((r) => r.operator_email === user?.email).length + pending.filter((item) => item.operator_email === user?.email).length);
     }
-  }, [eventoId, cacheRegistros]);
+  }, [eventoId, cacheRegistros, user?.email]);
 
   // WS lifecycle
   useEffect(() => {
@@ -394,6 +404,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     setLastDuplicate(null);
     setLastSuccess(null);
     setTotalRegistros(0);
+    setMisRegistros(0);
     const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
       .filter((item) => item.evento_id === id);
     setQueueSize(pending.length);
@@ -401,10 +412,11 @@ export function EventoProvider({ children }: { children: ReactNode }) {
     setRegistros(pending.map(queuedRegistro));
     // Load initial
     try {
-      const [list, est, cedulas] = await Promise.all([
+      const [list, est, cedulas, mine] = await Promise.all([
         api.registros(id, REGISTROS_RECENT_LIMIT, 0),
         api.estado(id),
         api.registroCedulas(id),
+        api.misRegistros(id),
       ]);
       const set = new Set<string>((cedulas.length ? cedulas : list.map((r) => r.cedula)).map(String));
       pending.forEach((item) => set.add(item.cedula));
@@ -414,18 +426,21 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       setRegistros(visible);
       await cacheRegistros(id, visible);
       setTotalRegistros(Number(est.total ?? list.length));
+      setMisRegistros(Number(mine.total ?? 0) + pending.filter((item) => item.operator_email === user?.email).length);
       setDuplicadosBloqueados(est.duplicados_detectados ?? 0);
       setActivos(est.dispositivos_activos ?? 0);
     } catch {
-      // ignore
+      const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${id}`, null)) || [];
+      setMisRegistros(cached.filter((r) => r.operator_email === user?.email).length + pending.filter((item) => item.operator_email === user?.email).length);
     }
-  }, [cacheRegistros]);
+  }, [cacheRegistros, user?.email]);
 
   const clearEvento = useCallback(() => {
     setEventoId(null);
     setEventoNombre("");
     setRegistros([]);
     setTotalRegistros(0);
+    setMisRegistros(0);
     cedulasSetRef.current = new Set();
     void storage.removeItem(SELECTED_EVENT_KEY);
     try {
@@ -483,6 +498,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         fecha_nacimiento: (extras as any).fecha_nacimiento || "",
         fecha_expiracion: (extras as any).fecha_expiracion || "",
         tipo_sangre: (extras as any).tipo_sangre || "",
+        operator_email: user?.email || "",
       };
 
       // Write-ahead queue: durably store each scan before the first network call.
@@ -502,13 +518,14 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
       const local = queuedRegistro({ ...payload, idempotency_key, attempts: 0 });
       addRegistro(local);
+      setMisRegistros((prev) => prev + 1);
       setLastSuccess({ cedula, ts: Date.now() });
       // Network delivery runs in the background; the camera is immediately
       // available for the next person. The write-ahead copy is already durable.
       void flushQueue();
       return { ok: true, mensaje: "Guardado en este teléfono; sincronizando con el servidor.", registro: local };
     },
-    [eventoId, addRegistro, flushQueue],
+    [eventoId, addRegistro, flushQueue, user?.email],
   );
 
   // Load queue size at startup
@@ -525,6 +542,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         eventoNombre,
         registros,
         totalRegistros,
+        misRegistros,
         cedulasSet: cedulasSetRef.current,
         wsStatus,
         activos,

@@ -1171,6 +1171,25 @@ async def listar_registros(
     return docs
 
 
+@api.get("/eventos/{evento_id}/mis-registros")
+async def contar_mis_registros(evento_id: str, current=Depends(get_current_user)):
+    """Return only the number of scans made by the authenticated operator."""
+    evento = await db.eventos.find_one({"id": evento_id}, {"_id": 0, "id": 1})
+    if not evento:
+        raise HTTPException(status_code=404, detail="Evento no existe")
+    operator_id = str(current.get("id") or "")
+    operator_email = str(current.get("email") or "").strip().lower()
+    criteria = {"evento_id": evento_id, "$or": []}
+    if operator_id:
+        criteria["$or"].append({"operator_id": operator_id})
+    if operator_email:
+        criteria["$or"].append({"operator_email": operator_email})
+    if not criteria["$or"]:
+        return {"total": 0}
+    total = await db.registros.count_documents(criteria)
+    return {"total": total}
+
+
 @api.get("/eventos/{evento_id}/cedulas")
 async def listar_cedulas_evento(evento_id: str, current=Depends(get_current_user)):
     cedulas = await db.registros.distinct("cedula", {"evento_id": evento_id})
