@@ -758,7 +758,7 @@ export default function EscanearScreen() {
         </TouchableOpacity>
       </View>
 
-      {scanFeedback && (
+      {scanFeedback && mode === "camera" && (
         <View
           accessibilityLiveRegion="polite"
           testID="scan-confirmation-card"
@@ -891,6 +891,35 @@ export default function EscanearScreen() {
             </View>
           </ScrollView>
         </KeyboardAvoidingView>
+      )}
+
+      {/* In manual mode keep the input and register button above the feedback
+          card so the next document can be entered without losing the field. */}
+      {scanFeedback && mode === "manual" && (
+        <View
+          accessibilityLiveRegion="polite"
+          testID="scan-confirmation-card"
+          style={[styles.confirmationCard, styles[`confirmation${scanFeedback.kind}`]]}
+        >
+          <Ionicons
+            name={scanFeedback.kind === "ok" ? "checkmark-circle" : scanFeedback.kind === "dup" ? "alert-circle" : "close-circle"}
+            size={34}
+            color="#fff"
+          />
+          <View style={styles.confirmationCopy}>
+            <Text style={styles.confirmationTitle}>{scanFeedback.title}</Text>
+            {!!scanFeedback.cedula && <Text style={styles.confirmationCedula}>Documento: CC {scanFeedback.cedula}</Text>}
+            {!!scanFeedback.municipio && <Text style={styles.confirmationMunicipio}>Municipio: {scanFeedback.municipio}</Text>}
+            <Text style={styles.confirmationDetail}>{scanFeedback.detail}</Text>
+          </View>
+          <TouchableOpacity
+            accessibilityLabel="Cerrar confirmación"
+            onPress={() => setScanFeedback(null)}
+            style={styles.confirmationClose}
+          >
+            <Ionicons name="close" size={20} color="rgba(255,255,255,0.8)" />
+          </TouchableOpacity>
+        </View>
       )}
 
       {(previewLoading || preview) && (
