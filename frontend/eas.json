@@ -11,13 +11,13 @@
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scanses-production.up.railway.app"
+        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scan-ses.onrender.com"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scanses-production.up.railway.app"
+        "EXPO_PUBLIC_BACKEND_URL": "https://cc-scan-ses.onrender.com"
       }
     }
   },
