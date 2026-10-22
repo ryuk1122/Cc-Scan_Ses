@@ -936,7 +936,7 @@ export default function EscanearScreen() {
           </View>
           {!!preview && <Text style={styles.teacherDocument}>Documento: CC {preview.cedula}</Text>}
           {!!preview?.afiliado?.nombre && <Text style={styles.teacherName} numberOfLines={2}>{preview.afiliado.nombre}</Text>}
-          {!previewLoading && <Text style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
+          {!previewLoading && <Text numberOfLines={1} ellipsizeMode="tail" style={styles.teacherMunicipality}>Municipio: {preview?.error ? "Sin verificar" : preview?.afiliado?.municipio || "No registrado en la base"}</Text>}
           {!previewLoading && !preview?.error && preview && (
             <Text
               testID="aportes-status"
@@ -1017,14 +1017,14 @@ export default function EscanearScreen() {
 }
 
 const styles = StyleSheet.create({
-  teacherCard: { marginHorizontal: 16, marginVertical: 8, padding: 16, borderRadius: 16, gap: 7 },
+  teacherCard: { marginHorizontal: 16, marginVertical: 6, paddingHorizontal: 14, paddingVertical: 12, borderRadius: 16, gap: 4 },
   teacherHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
-  teacherAnswer: { color: "#fff", fontSize: 30, fontWeight: "900", flexShrink: 1 },
-  teacherDocument: { color: "rgba(255,255,255,0.92)", fontSize: 19, fontWeight: "800", letterSpacing: 0.2 },
-  teacherName: { color: "#fff", fontSize: 25, lineHeight: 30, fontWeight: "900", marginTop: 1 },
+  teacherAnswer: { color: "#fff", fontSize: 25, fontWeight: "900", flexShrink: 1 },
+  teacherDocument: { color: "rgba(255,255,255,0.92)", fontSize: 16, fontWeight: "800", letterSpacing: 0.2 },
+  teacherName: { color: "#fff", fontSize: 21, lineHeight: 25, fontWeight: "900", marginTop: 1 },
   teacherDetail: { color: "#fff", fontSize: 15 },
-  teacherMunicipality: { color: "#fff", fontSize: 20, fontWeight: "700" },
-  aportesStatus: { color: "#fde68a", fontSize: 18, fontWeight: "900", marginTop: 7, letterSpacing: 0.5 },
+  teacherMunicipality: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  aportesStatus: { color: "#fde68a", fontSize: 15, fontWeight: "900", marginTop: 4, letterSpacing: 1.1 },
   container: { flex: 1, backgroundColor: theme.bg },
   topBar: { flexDirection: "row", paddingHorizontal: 14, paddingTop: 6, paddingBottom: 8, alignItems: "center", gap: 10 },
   eventTitle: { color: theme.text, fontSize: 17, fontWeight: "900" },
