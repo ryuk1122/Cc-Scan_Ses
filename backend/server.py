@@ -1333,7 +1333,10 @@ async def escanear(
     if not cedula_norm:
         raise HTTPException(status_code=400, detail="Cédula inválida")
 
-    evento = await db.eventos.find_one({"id": body.evento_id})
+    evento = await db.eventos.find_one(
+        {"id": body.evento_id},
+        {"_id": 0, "id": 1, "activo": 1},
+    )
     if not evento:
         raise HTTPException(status_code=404, detail="Evento no existe")
     if not evento.get("activo", True):
@@ -1342,11 +1345,17 @@ async def escanear(
     dedup_hash = compute_dedup_hash(cedula_norm, body.evento_id, body.device_id, body.nonce)
     idem_key   = idempotency_key or dedup_hash
 
-    cached = await db.deduplication.find_one({"idempotency_key": idem_key}, {"_id": 0})
+    # These are independent indexed reads. Run them together so a normal scan
+    # does not pay two MongoDB round trips before the affiliation lookup.
+    cached, existing = await asyncio.gather(
+        db.deduplication.find_one({"idempotency_key": idem_key}, {"_id": 0}),
+        db.registros.find_one(
+            {"evento_id": body.evento_id, "cedula": cedula_norm},
+            {"_id": 0},
+        ),
+    )
     if cached:
         return cached["response"]
-
-    existing = await db.registros.find_one({"evento_id": body.evento_id, "cedula": cedula_norm}, {"_id": 0})
     if existing:
         await db.event_store.insert_one({
             "event_type":   "DUPLICADO_RECHAZADO",
@@ -1468,22 +1477,26 @@ async def escanear(
         raise HTTPException(status_code=409, detail=response)
 
     payload_out = {k: v for k, v in doc.items() if k not in ("_id", "nonce", "dedup_hash", "operator_id")}
-    await db.event_store.insert_one({
+    audit_doc = {
         "event_type":   "REGISTRO_CREADO",
         "aggregate_id": body.evento_id,
         "data":         payload_out,
         "timestamp":    ts_ms,
         "created_at":   now_iso(),
         "dedup_hash":   dedup_hash,
-    })
-    await manager.broadcast(body.evento_id, {"type": "registro:nuevo", "registro": payload_out, "ts": ts_ms})
-
+    }
     response = {"ok": True, "registro": payload_out, "afiliado_encontrado": es_afiliado}
-    await db.deduplication.update_one(
-        {"idempotency_key": idem_key},
-        {"$set": {"idempotency_key": idem_key, "response": response, "created_at": now_iso()}},
-        upsert=True,
+    # Audit and idempotency persistence are independent after the registration
+    # is safely inserted. Persist them together without changing the response.
+    await asyncio.gather(
+        db.event_store.insert_one(audit_doc),
+        db.deduplication.update_one(
+            {"idempotency_key": idem_key},
+            {"$set": {"idempotency_key": idem_key, "response": response, "created_at": now_iso()}},
+            upsert=True,
+        ),
     )
+    await manager.broadcast(body.evento_id, {"type": "registro:nuevo", "registro": payload_out, "ts": ts_ms})
     return response
 
 
