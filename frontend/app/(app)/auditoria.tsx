@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, FlatList, RefreshControl, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { Redirect, useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { theme } from "@/src/theme";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
+import { useSession } from "@/src/ctx/session";
 
 type AuditEvent = {
   event_type: string;
@@ -18,13 +19,16 @@ type AuditEvent = {
 };
 
 export default function AuditoriaScreen() {
+  const { user } = useSession();
   const router = useRouter();
   const { eventoId, eventoNombre } = useEvento();
   const [items, setItems] = useState<AuditEvent[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
+  const isAdmin = user?.role === "admin";
+
   const load = useCallback(async () => {
-    if (!eventoId) return;
+    if (!isAdmin || !eventoId) return;
     try {
       const r = await api.auditoria(eventoId);
       setItems(r as AuditEvent[]);
@@ -33,15 +37,17 @@ export default function AuditoriaScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [eventoId]);
+  }, [eventoId, isAdmin]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   useEffect(() => {
-    if (!eventoId) return;
+    if (!isAdmin || !eventoId) return;
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
-  }, [eventoId, load]);
+  }, [eventoId, isAdmin, load]);
+
+  if (!isAdmin) return <Redirect href="/(app)/eventos" />;
 
   if (!eventoId) {
     return (

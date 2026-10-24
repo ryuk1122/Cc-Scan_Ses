@@ -25,7 +25,9 @@ import { useSession } from "@/src/ctx/session";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
 
-type Tab = "panel" | "afiliados" | "registros";
+type Tab = "panel" | "afiliados" | "registros" | "operadores";
+type OperatorItem = { id: string; email: string; nombre: string; active: boolean; online: boolean; created_at?: string };
+type DeviceItem = { device_id: string; user_id: string; email: string; nombre: string; active: boolean; created_at: string; last_seen_at: string; revoked_at?: string };
 type MetricItem = { label: string; total: number };
 type AdminMetrics = {
   global: { afiliados: number; eventos: number; eventos_activos: number; registros: number };
@@ -100,6 +102,15 @@ export default function AdminScreen() {
   const [tab, setTab] = useState<Tab>("panel");
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(false);
+  const [operators, setOperators] = useState<OperatorItem[]>([]);
+  const [devices, setDevices] = useState<DeviceItem[]>([]);
+  const [operatorsLoading, setOperatorsLoading] = useState(false);
+  const [showDeviceList, setShowDeviceList] = useState(false);
+  const [showCreateOperator, setShowCreateOperator] = useState(false);
+  const [newOperatorName, setNewOperatorName] = useState("");
+  const [newOperatorEmail, setNewOperatorEmail] = useState("");
+  const [newOperatorPassword, setNewOperatorPassword] = useState("");
+  const [creatingOperator, setCreatingOperator] = useState(false);
 
   // Afiliados state
   const [afQuery, setAfQuery] = useState("");
@@ -133,6 +144,85 @@ export default function AdminScreen() {
       setMetricsLoading(false);
     }
   }, [eventoId, isAdmin]);
+
+  const loadOperators = useCallback(async () => {
+    if (!isAdmin) return;
+    setOperatorsLoading(true);
+    try {
+      const [operatorList, deviceList] = await Promise.all([api.listOperators(), api.listOperatorDevices()]);
+      setOperators(operatorList);
+      setDevices(deviceList);
+    } catch (e: any) {
+      Alert.alert("Error", errorMessage(e, "No se pudieron cargar los operadores"));
+    } finally {
+      setOperatorsLoading(false);
+    }
+  }, [isAdmin]);
+
+  const createOperator = useCallback(async () => {
+    if (!newOperatorName.trim() || !newOperatorEmail.trim() || newOperatorPassword.length < 8) {
+      Alert.alert("Revisa los datos", "Escribe nombre, correo y una contraseña de al menos 8 caracteres.");
+      return;
+    }
+    setCreatingOperator(true);
+    try {
+      const created = await api.createOperator({ nombre: newOperatorName.trim(), email: newOperatorEmail.trim(), password: newOperatorPassword });
+      setNewOperatorName(""); setNewOperatorEmail(""); setNewOperatorPassword(""); setShowCreateOperator(false);
+      await loadOperators();
+      Alert.alert("Operador creado · PIN de primer dispositivo", `${created.nombre || created.email}\n\nPIN: ${created.pin}\n\nEntrégaselo al operador. Vence en ${created.expires_in_minutes} minutos y se usa una sola vez.`);
+    } catch (e: any) {
+      Alert.alert("No se pudo crear", errorMessage(e));
+    } finally {
+      setCreatingOperator(false);
+    }
+  }, [loadOperators, newOperatorEmail, newOperatorName, newOperatorPassword]);
+
+  const issueDevicePin = useCallback(async (operator: OperatorItem) => {
+    try {
+      const result = await api.issueDevicePin(operator.id);
+      Alert.alert("PIN para instalación nueva", `${operator.nombre || operator.email}\n\n${result.pin}\n\nVence en ${result.expires_in_minutes} minutos y solo sirve una vez.`);
+    } catch (e: any) {
+      Alert.alert("No se pudo generar el PIN", errorMessage(e));
+    }
+  }, []);
+
+  const revokeDevice = useCallback((device: DeviceItem) => {
+    Alert.alert("Revocar instalación", `El dispositivo de ${device.nombre || device.email} perderá acceso y no podrá volver a usar ese ID. Sus datos locales no se borrarán.`, [
+      { text: "Cancelar", style: "cancel" },
+      { text: "Revocar", style: "destructive", onPress: async () => {
+        try {
+          await api.revokeDevice(device.device_id);
+          setDevices((items) => items.map((item) => item.device_id === device.device_id ? { ...item, active: false, revoked_at: new Date().toISOString() } : item));
+        } catch (e: any) { Alert.alert("No se pudo revocar", errorMessage(e)); }
+      } },
+    ]);
+  }, []);
+
+  const toggleOperator = useCallback((operator: OperatorItem) => {
+    const active = !operator.active;
+    Alert.alert(
+      active ? "Reactivar operador" : "Bloquear operador",
+      active
+        ? `Se restaurará el acceso de ${operator.nombre || operator.email}. Sus datos y escaneos pendientes se conservan.`
+        : `Se cerrará su sesión y no podrá volver a iniciar sesión. No se borra la APK ni sus datos. Antes de bloquear, confirma que su cola esté sincronizada; si quedan escaneos pendientes, tendrás que reactivarlo para que pueda enviarlos.`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: active ? "Reactivar" : "Bloquear acceso",
+          style: active ? "default" : "destructive",
+          onPress: async () => {
+            try {
+              await api.setOperatorActive(operator.id, active);
+              setOperators((items) => items.map((item) => item.id === operator.id ? { ...item, active, online: active ? item.online : false } : item));
+              Alert.alert(active ? "Acceso restaurado" : "Acceso bloqueado", active ? "El operador ya puede iniciar sesión nuevamente." : "El operador fue desconectado. Su cuenta, registros y datos locales no se borraron.");
+            } catch (e: any) {
+              Alert.alert("No se pudo cambiar el acceso", errorMessage(e));
+            }
+          },
+        },
+      ],
+    );
+  }, []);
 
   const loadAfiliadosPage = useCallback(async (skip = 0) => {
     if (!isAdmin) return;
@@ -221,16 +311,24 @@ export default function AdminScreen() {
 
   useEffect(() => {
     if (tab === "registros") {
-      loadRegistros();
+      const initialLoad = setTimeout(() => { void loadRegistros(); }, 0);
+      return () => clearTimeout(initialLoad);
     }
   }, [tab, loadRegistros]);
 
   useEffect(() => {
     if (tab !== "panel") return;
-    void loadMetrics();
+    const initialLoad = setTimeout(() => { void loadMetrics(); }, 0);
     const id = setInterval(loadMetrics, 7000);
-    return () => clearInterval(id);
+    return () => { clearTimeout(initialLoad); clearInterval(id); };
   }, [tab, loadMetrics]);
+
+  useEffect(() => {
+    if (tab === "operadores") {
+      const initialLoad = setTimeout(() => { void loadOperators(); }, 0);
+      return () => clearTimeout(initialLoad);
+    }
+  }, [tab, loadOperators]);
 
   const pickImport = async () => {
     try {
@@ -436,6 +534,14 @@ export default function AdminScreen() {
           <Text style={[styles.tabText, tab === "registros" && { color: "#fff" }]}>Evento</Text>
           <Text style={[styles.tabBadge, tab === "registros" && { color: "#fff" }]}>{registrosTotal}</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          testID="admin-tab-operadores"
+          style={[styles.tabBtn, tab === "operadores" && styles.tabActive]}
+          onPress={() => setTab("operadores")}
+        >
+          <Ionicons name="lock-closed" size={16} color={tab === "operadores" ? "#fff" : theme.textSecondary} />
+          <Text style={[styles.tabText, tab === "operadores" && { color: "#fff" }]}>Acceso</Text>
+        </TouchableOpacity>
       </View>
 
       {tab === "panel" ? (
@@ -618,7 +724,7 @@ export default function AdminScreen() {
             />
           )}
         </View>
-      ) : (
+      ) : tab === "registros" ? (
         <View style={{ flex: 1, padding: 16 }}>
           <View style={styles.eventInfo}>
             <Text style={styles.eventInfoLabel}>Evento actual</Text>
@@ -685,7 +791,110 @@ export default function AdminScreen() {
             )}
           />
         </View>
+      ) : (
+        <View style={{ flex: 1 }}>
+          <View style={styles.operatorNotice}>
+            <Text style={styles.operatorNoticeTitle}>Bloqueo remoto de acceso</Text>
+            <Text style={styles.operatorNoticeText}>Las cuentas solo las crea Admin. PIN de un solo uso para cada instalación nueva; puedes revocar un dispositivo sin borrar sus datos locales. El bloqueo requiere conexión para surtir efecto en el teléfono.</Text>
+          </View>
+          <View style={styles.accessActions}>
+            <TouchableOpacity style={styles.accessActionBtn} onPress={() => setShowCreateOperator(true)}>
+              <Ionicons name="person-add" size={16} color="#fff" /><Text style={styles.accessActionText}>Nuevo operador</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.accessActionBtn, { backgroundColor: theme.surfaceElevated }]} onPress={() => setShowDeviceList(true)}>
+              <Ionicons name="phone-portrait" size={16} color={theme.text} /><Text style={[styles.accessActionText, { color: theme.text }]}>Dispositivos ({devices.length})</Text>
+            </TouchableOpacity>
+          </View>
+          {operatorsLoading ? <ActivityIndicator color={theme.brand} style={{ marginTop: 24 }} /> : (
+            <FlatList
+              testID="admin-operators-list"
+              data={operators}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={{ padding: 12, paddingBottom: 36, gap: 8 }}
+              refreshControl={<RefreshControl tintColor={theme.brand} refreshing={operatorsLoading} onRefresh={loadOperators} />}
+              ListEmptyComponent={<Text style={styles.empty}>No hay operadores registrados.</Text>}
+              renderItem={({ item }) => (
+                <View style={styles.operatorRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.afName}>{cleanDisplayName(item.nombre) || "Operador"}</Text>
+                    <Text style={styles.afMeta}>{item.email}</Text>
+                    <Text style={[styles.operatorState, { color: item.active ? theme.success : theme.error }]}>
+                      {item.active ? (item.online ? "Activo · conectado" : "Activo · desconectado") : "Bloqueado"}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    accessibilityLabel={`Generar PIN para ${item.email}`}
+                    style={[styles.operatorAction, { backgroundColor: theme.info, borderColor: theme.info }]}
+                    disabled={!item.active}
+                    onPress={() => issueDevicePin(item)}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "900", fontSize: 12 }}>PIN</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    testID={`operator-access-${item.id}`}
+                    style={[styles.operatorAction, { backgroundColor: item.active ? theme.errorBg : theme.successBg, borderColor: item.active ? theme.error : theme.success }]}
+                    onPress={() => toggleOperator(item)}
+                  >
+                    <Text style={{ color: item.active ? theme.error : theme.success, fontWeight: "900", fontSize: 12 }}>
+                      {item.active ? "Bloquear" : "Reactivar"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            />
+          )}
+        </View>
       )}
+
+      {/* Edit afiliado modal */}
+      <Modal visible={showCreateOperator} transparent animationType="slide" onRequestClose={() => setShowCreateOperator(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalWrap}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <ScrollView keyboardShouldPersistTaps="handled">
+              <Text style={styles.modalTitle}>Crear operador</Text>
+              <Text style={styles.formLabel}>Nombre</Text>
+              <TextInput style={styles.formInput} value={newOperatorName} onChangeText={setNewOperatorName} placeholder="Nombre completo" placeholderTextColor={theme.textDisabled} />
+              <Text style={styles.formLabel}>Correo</Text>
+              <TextInput style={styles.formInput} value={newOperatorEmail} onChangeText={setNewOperatorEmail} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} placeholder="correo@ejemplo.com" placeholderTextColor={theme.textDisabled} />
+              <Text style={styles.formLabel}>Contraseña temporal</Text>
+              <TextInput style={styles.formInput} value={newOperatorPassword} onChangeText={setNewOperatorPassword} secureTextEntry placeholder="Mínimo 8 caracteres" placeholderTextColor={theme.textDisabled} />
+              <Text style={styles.operatorNoticeText}>Al crear la cuenta aparecerá el PIN temporal del primer dispositivo. Entrégaselo al operador; vence en 10 minutos y solo se usa una vez.</Text>
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
+                <TouchableOpacity style={[styles.modalBtn, { backgroundColor: theme.surfaceElevated }]} onPress={() => setShowCreateOperator(false)}><Text style={[styles.modalBtnText, { color: theme.text }]}>Cancelar</Text></TouchableOpacity>
+                <TouchableOpacity style={[styles.modalBtn, { backgroundColor: theme.brand }]} onPress={createOperator} disabled={creatingOperator}>{creatingOperator ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalBtnText}>Crear</Text>}</TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={showDeviceList} transparent animationType="slide" onRequestClose={() => setShowDeviceList(false)}>
+        <View style={styles.modalWrap}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Dispositivos registrados</Text>
+            <FlatList
+              data={devices}
+              keyExtractor={(item) => item.device_id}
+              contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
+              ListEmptyComponent={<Text style={styles.empty}>Todavía no hay dispositivos autorizados.</Text>}
+              renderItem={({ item }) => (
+                <View style={styles.operatorRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.afName}>{item.nombre || item.email}</Text>
+                    <Text style={styles.afMeta}>{item.email} · {item.active ? "Autorizado" : "Revocado"}</Text>
+                    <Text style={styles.afMeta}>Última entrada: {item.last_seen_at ? new Date(item.last_seen_at).toLocaleString("es-CO") : "—"}</Text>
+                    <Text style={styles.deviceIdText}>{item.device_id}</Text>
+                  </View>
+                  {item.active && <TouchableOpacity style={[styles.operatorAction, { backgroundColor: theme.errorBg, borderColor: theme.error }]} onPress={() => revokeDevice(item)}><Text style={{ color: theme.error, fontWeight: "900", fontSize: 12 }}>Revocar</Text></TouchableOpacity>}
+                </View>
+              )}
+            />
+            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: theme.surfaceElevated, alignSelf: "stretch" }]} onPress={() => setShowDeviceList(false)}><Text style={[styles.modalBtnText, { color: theme.text }]}>Cerrar</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Edit afiliado modal */}
       <Modal visible={!!editing} transparent animationType="slide" onRequestClose={() => setEditing(null)}>
@@ -749,6 +958,16 @@ const styles = StyleSheet.create({
   tabActive: { backgroundColor: theme.brand },
   tabText: { color: theme.textSecondary, fontWeight: "700", fontSize: 13 },
   tabBadge: { color: theme.textDisabled, fontWeight: "900", fontSize: 12 },
+  operatorNotice: { margin: 12, padding: 14, borderRadius: 10, borderWidth: 1, borderColor: theme.warning, backgroundColor: theme.warningBg, gap: 5 },
+  operatorNoticeTitle: { color: theme.text, fontSize: 14, fontWeight: "900" },
+  operatorNoticeText: { color: theme.textSecondary, fontSize: 12, lineHeight: 17 },
+  accessActions: { flexDirection: "row", gap: 8, paddingHorizontal: 12, paddingBottom: 4 },
+  accessActionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 11, borderRadius: 8, backgroundColor: theme.brand },
+  accessActionText: { color: "#fff", fontSize: 12, fontWeight: "800" },
+  operatorRow: { flexDirection: "row", alignItems: "center", gap: 10, padding: 13, backgroundColor: theme.surface, borderRadius: 10, borderWidth: 1, borderColor: theme.border },
+  deviceIdText: { color: theme.textDisabled, fontSize: 9, marginTop: 3 },
+  operatorState: { fontSize: 11, fontWeight: "800", marginTop: 4 },
+  operatorAction: { minWidth: 82, alignItems: "center", justifyContent: "center", borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 9 },
   panelScroll: { padding: 12, paddingBottom: 40, gap: 10 },
   kpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   kpiCard: { flexGrow: 1, flexBasis: "47%", minWidth: 150, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, padding: 12 },

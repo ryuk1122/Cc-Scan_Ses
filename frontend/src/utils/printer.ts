@@ -323,7 +323,7 @@ async function imprimirEscarapelaRawEscpos({ nombre, cargo, municipio }: Escarap
 export async function imprimirEscarapela(params: EscarapelaPrintData): Promise<void> {
   try {
     await imprimirEscarapelaRawEscpos(params);
-  } catch (error) {
+  } catch {
     try {
       await imprimirEscarapelaEscpos(params);
     } catch {

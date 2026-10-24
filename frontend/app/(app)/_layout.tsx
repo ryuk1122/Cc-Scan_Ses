@@ -44,8 +44,8 @@ export default function AppLayout() {
     >
       <Tabs.Screen name="eventos" options={{ title: "Escaner", tabBarIcon: ScannerIcon }} />
       <Tabs.Screen name="escanear" options={{ href: null }} />
-      <Tabs.Screen name="dashboard" options={{ title: "Panel", tabBarIcon: DashboardIcon }} />
-      <Tabs.Screen name="auditoria" options={{ title: "Auditoría", tabBarIcon: AuditoriaIcon }} />
+      <Tabs.Screen name="dashboard" options={{ title: "Panel", tabBarIcon: DashboardIcon, href: isAdmin ? "/(app)/dashboard" : null }} />
+      <Tabs.Screen name="auditoria" options={{ title: "Auditoría", tabBarIcon: AuditoriaIcon, href: isAdmin ? "/(app)/auditoria" : null }} />
       <Tabs.Screen
         name="admin"
         options={{

@@ -12,7 +12,7 @@ import {
   Alert,
   Image,
 } from "react-native";
-import { useRouter, Link } from "expo-router";
+import { useRouter } from "expo-router";
 
 import { useSession } from "@/src/ctx/session";
 import { theme } from "@/src/theme";
@@ -23,6 +23,8 @@ export default function SignIn() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [verificationPin, setVerificationPin] = useState("");
+  const [showPinField, setShowPinField] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const onSubmit = async () => {
@@ -32,7 +34,7 @@ export default function SignIn() {
     }
     setLoading(true);
     try {
-      await signIn(email.trim(), password);
+      await signIn(email.trim(), password, verificationPin);
       router.replace("/(app)/eventos");
     } catch (e: any) {
       Alert.alert("Error", errorMessage(e, "No se pudo iniciar sesion"));
@@ -83,6 +85,25 @@ export default function SignIn() {
             autoCapitalize="none"
           />
 
+          <TouchableOpacity onPress={() => setShowPinField((visible) => !visible)} accessibilityRole="button">
+            <Text style={styles.pinToggle}>{showPinField ? "Ocultar PIN de dispositivo" : "¿Eres operador en un dispositivo nuevo? Ingresa tu PIN de Admin"}</Text>
+          </TouchableOpacity>
+          {showPinField && <>
+            <Text style={styles.label}>PIN de verificación del operador</Text>
+            <TextInput
+              testID="login-device-pin-input"
+              style={styles.input}
+              value={verificationPin}
+              onChangeText={setVerificationPin}
+              placeholder="PIN de 6 dígitos"
+              placeholderTextColor={theme.textDisabled}
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={6}
+            />
+            <Text style={styles.pinHelp}>Admin debe dejar este espacio cerrado. El PIN del operador vence en 10 minutos y se usa una sola vez.</Text>
+          </>}
+
           <TouchableOpacity
             testID="login-submit-button"
             style={[styles.btn, loading && { opacity: 0.7 }]}
@@ -96,13 +117,7 @@ export default function SignIn() {
             )}
           </TouchableOpacity>
 
-          <Link href="/sign-up" asChild>
-            <TouchableOpacity testID="go-to-signup" style={styles.linkBtn}>
-              <Text style={styles.linkText}>
-                ¿No tienes cuenta? <Text style={styles.linkAccent}>Crear cuenta</Text>
-              </Text>
-            </TouchableOpacity>
-          </Link>
+          <Text style={styles.linkText}>Las cuentas y los PIN los administra el administrador del sistema.</Text>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -153,7 +168,8 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   btnText: { color: "#fff", fontWeight: "800", fontSize: 16 },
-  linkBtn: { alignItems: "center", marginTop: 8, paddingVertical: 8 },
-  linkText: { color: theme.textSecondary, fontSize: 14 },
+  linkText: { color: theme.textSecondary, fontSize: 13, textAlign: "center", marginTop: 8 },
+  pinHelp: { color: theme.textSecondary, fontSize: 11, lineHeight: 15, marginTop: -5 },
+  pinToggle: { color: theme.brand, fontSize: 13, fontWeight: "700", marginTop: 8, marginBottom: 10 },
   linkAccent: { color: theme.info, fontWeight: "700" },
 });

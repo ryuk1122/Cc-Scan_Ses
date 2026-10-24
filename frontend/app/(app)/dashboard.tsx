@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useRouter } from "expo-router";
+import { Redirect, useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { theme } from "@/src/theme";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
+import { useSession } from "@/src/ctx/session";
 
 type Estado = {
   total: number;
@@ -17,28 +18,33 @@ type Estado = {
 };
 
 export default function DashboardScreen() {
+  const { user } = useSession();
   const router = useRouter();
   const { eventoId, eventoNombre, wsStatus, queueSize, totalRegistros, activos } = useEvento();
   const [estado, setEstado] = useState<Estado | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
+  const isAdmin = user?.role === "admin";
+
   const load = useCallback(async () => {
-    if (!eventoId) return;
+    if (!isAdmin || !eventoId) return;
     try {
       const r = await api.estado(eventoId);
       setEstado(r);
     } catch {
       // ignore
     }
-  }, [eventoId]);
+  }, [eventoId, isAdmin]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   useEffect(() => {
-    if (!eventoId) return;
+    if (!isAdmin || !eventoId) return;
     const id = setInterval(load, 4000);
     return () => clearInterval(id);
-  }, [eventoId, load]);
+  }, [eventoId, isAdmin, load]);
+
+  if (!isAdmin) return <Redirect href="/(app)/eventos" />;
 
   if (!eventoId) {
     return (

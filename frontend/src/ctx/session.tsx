@@ -1,6 +1,6 @@
 /**
  * Session context: holds JWT + user. Persists in SecureStore via @/src/utils/storage.
- * Exposes signIn / signUp / signOut and isLoading for splash gating.
+ * Exposes signIn / signOut and isLoading for splash gating.
  */
 import React, {
   createContext,
@@ -10,7 +10,8 @@ import React, {
   useCallback,
   ReactNode,
 } from "react";
-import { api, setToken, clearToken, getToken } from "@/src/utils/api";
+import { api, setToken, clearToken, getToken, setAuthRevokedHandler } from "@/src/utils/api";
+import { getDeviceId } from "@/src/utils/device";
 
 type User = { id: string; email: string; nombre: string; role: string };
 
@@ -18,8 +19,7 @@ type SessionContextValue = {
   user: User | null;
   token: string | null;
   isLoading: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, nombre: string) => Promise<void>;
+  signIn: (email: string, password: string, verificationPin?: string) => Promise<void>;
   signOut: () => Promise<void>;
 };
 
@@ -37,6 +37,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         if (stored) {
           setTokenState(stored);
           const me = await api.me();
+          if (me?.security_version !== 2) throw new Error("El servidor todavía no tiene activada la seguridad nueva. Actualiza el backend antes de usar esta versión.");
           setUser(me);
         }
       } catch {
@@ -49,15 +50,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const r = await api.login({ email, password });
-    await setToken(r.access_token);
-    setTokenState(r.access_token);
-    setUser(r.user);
+  useEffect(() => {
+    setAuthRevokedHandler(() => {
+      void clearToken();
+      setTokenState(null);
+      setUser(null);
+    });
+    return () => setAuthRevokedHandler(null);
   }, []);
 
-  const signUp = useCallback(async (email: string, password: string, nombre: string) => {
-    const r = await api.register({ email, password, nombre });
+  const signIn = useCallback(async (email: string, password: string, verificationPin = "") => {
+    const device_id = await getDeviceId();
+    const r = await api.login({ email, password, device_id, verification_pin: verificationPin.trim() });
+    if (r.user?.security_version !== 2) {
+      throw new Error("El servidor todavía no tiene activada la seguridad nueva. Actualiza el backend antes de usar esta versión.");
+    }
+    if (r.user?.role === "operator" && r.user?.device_id !== device_id) {
+      throw new Error("El servidor no confirmó este dispositivo. No iniciaré sesión hasta verificarlo con el PIN de Admin.");
+    }
     await setToken(r.access_token);
     setTokenState(r.access_token);
     setUser(r.user);
@@ -70,7 +80,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <SessionContext.Provider value={{ user, token, isLoading, signIn, signUp, signOut }}>
+    <SessionContext.Provider value={{ user, token, isLoading, signIn, signOut }}>
       {children}
     </SessionContext.Provider>
   );

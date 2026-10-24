@@ -21,10 +21,10 @@ import * as FileSystem from "expo-file-system";
 import { CameraView, useCameraPermissions } from "expo-camera";
 
 import { theme } from "@/src/theme";
+import { useSession } from "@/src/ctx/session";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
 import { extractCedula, parsePdf417 } from "@/src/utils/cedula";
-import { errorMessage } from "@/src/utils/errors";
 import { analizarConGemini } from "@/src/services/geminiService";
 
 const PILL_TIMEOUT = 2500;
@@ -269,20 +269,19 @@ function extractCedulaFromCameraPayload(raw: string): string {
 }
 
 export default function EscanearScreen() {
+  const { user } = useSession();
+  const isAdmin = user?.role === "admin";
   const router = useRouter();
   const [isFocused, setIsFocused] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
   const cameraReadBusy = useRef(false);
   const lookupSequence = useRef(0);
   const {
     eventoId,
     eventoNombre,
     registros,
-    totalRegistros,
     misRegistros,
     scan,
     wsStatus,
-    activos,
     duplicadosBloqueados,
     queueSize,
     clearEvento,
@@ -293,7 +292,6 @@ export default function EscanearScreen() {
   const [preview, setPreview] = useState<AfiliadoPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
-  const [barcodeLoading, setBarcodeLoading] = useState(false);
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
   const [iaLoading, setIaLoading] = useState(false);
   const [scannerEnabled, setScannerEnabled] = useState(true);
@@ -307,11 +305,10 @@ export default function EscanearScreen() {
   const scanBusyRef = useRef(false);
   const iaLoadingRef = useRef(false);
   const ocrLoadingRef = useRef(false);
-  const barcodeLoadingRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scannerRearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flashAnim = useRef(new Animated.Value(0)).current;
-  const scanLineAnim = useRef(new Animated.Value(0)).current;
+  const flashAnim = useMemo(() => new Animated.Value(0), []);
+  const scanLineAnim = useMemo(() => new Animated.Value(0), []);
   const cameraRef = useRef<any>(null);
   const [reticleHeight, setReticleHeight] = useState(0);
 
@@ -345,10 +342,6 @@ export default function EscanearScreen() {
       if (scannerRearmTimerRef.current) clearTimeout(scannerRearmTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    setScannerEnabled(mode === "camera");
-  }, [mode]);
 
   const buildDocumentPreview = useCallback((cedula: string, parsed: ReturnType<typeof parsePdf417>, fuente?: string): DocumentPreview => {
     const nombre = [
@@ -460,41 +453,8 @@ export default function EscanearScreen() {
     }
   }, [captureCameraBase64]);
 
-  const readCameraBarcode = useCallback(
-    async (silent = false, imageBase64?: string, options: { preferMrz?: boolean } = {}): Promise<OcrReadResult> => {
-      if ((!imageBase64 && !cameraRef.current) || barcodeLoadingRef.current) return { raw: "" };
-      barcodeLoadingRef.current = true;
-      setBarcodeLoading(true);
-      try {
-        const b64 = imageBase64 || await captureCameraBase64(options.preferMrz ? 0.78 : 0.68);
-        if (!b64) return { raw: "" };
-        const res = await api.barcodeCedula(b64, { preferMrz: !!options.preferMrz });
-        if (res.ok && res.cedula) {
-          const isMrz = res.source === "mrz_ocr" || res.format === "MRZ";
-          const mrzValid = res.mrz_valido ?? res.parsed?.mrz_valido;
-          // The OCR service can return a best-effort MRZ even when its check
-          // digits fail. Do not register a potentially misread identity.
-          if (options.preferMrz && isMrz && mrzValid !== true) {
-            return { raw: "" };
-          }
-          const raw = res.raw || res.raw_mrz?.join("\n") || res.cedula;
-          const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
-          return { raw, serverParsed };
-        }
-        return { raw: "" };
-      } catch (e: any) {
-        if (!silent) showToast("err", errorMessage(e, "Error leyendo barras"));
-        return { raw: "" };
-      } finally {
-        barcodeLoadingRef.current = false;
-        setBarcodeLoading(false);
-      }
-    },
-    [captureCameraBase64, showToast],
-  );
-
   const handleScan = useCallback(
-    async (raw: string, options: { skipBarcodeFallback?: boolean; serverParsed?: ServerParsedCedula } = {}) => {
+    async (raw: string, options: { serverParsed?: ServerParsedCedula } = {}) => {
       if (scanBusyRef.current) return;
       scanBusyRef.current = true;
       setScannerEnabled(false);
@@ -519,47 +479,16 @@ export default function EscanearScreen() {
               raw: rawToUse,
             }
           : parsePdf417(rawToUse);
-        const tryImageFallback = async (startMessage: string): Promise<boolean> => {
-          if (mode !== "camera") return false;
-          showToast("err", startMessage);
-          const ocr = await readCameraWithOcr();
-          if (ocr.raw && ocr.serverParsed?.cedula) {
-            rawToUse = ocr.raw;
-            inheritedServerParsed = ocr.serverParsed;
-            return true;
-          }
-          const ia = await readCameraWithGemini();
-          if (ia?.cedula) {
-            rawToUse = ia.cedula;
-            inheritedServerParsed = ia;
-            return true;
-          }
-          return false;
-        };
         if (!canUseServerParsed() && !isReliableBarcode(rawToUse, mode)) {
-          if (mode === "camera") {
-            const recovered = await tryImageFallback("Codigo incompleto. Intentando con IA...");
-            if (!recovered) {
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-              showToast("err", "No pude leerla. Alinea la cedula completa y evita reflejos.");
-              return;
-            }
-          } else {
-            await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-            showToast("err", "No pude confirmar la cédula.");
-            return;
-          }
+          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          showToast("err", mode === "camera"
+            ? "Código incompleto. Alinea el documento o toma la foto manualmente para OCR."
+            : "No pude confirmar la cédula.");
+          return;
         }
 
-        let parsed = buildParsed();
-        let cedula = cleanCedulaNumber(parsed.cedula || extractCedula(rawToUse) || "");
-        if (!cedula && mode === "camera") {
-          const recovered = await tryImageFallback("Codigo sin NUIP. Intentando con IA...");
-          if (recovered) {
-            parsed = buildParsed();
-            cedula = cleanCedulaNumber(parsed.cedula || extractCedula(rawToUse) || "");
-          }
-        }
+        const parsed = buildParsed();
+        const cedula = cleanCedulaNumber(parsed.cedula || extractCedula(rawToUse) || "");
         if (!cedula) {
           setScanFeedback({ kind: "err", title: "NO CONFIRMADA", detail: "No se encontró un número de cédula legible." });
           showToast("err", "No pude confirmar la cédula. Usa la camara completa o manual.");
@@ -650,7 +579,7 @@ export default function EscanearScreen() {
         if (mode === "camera") rearmScanner();
       }
     },
-    [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner, readCameraWithOcr, readCameraWithGemini],
+    [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner],
   );
 
   const captureAndDecodeBarcode = useCallback(async (silent = false) => {
@@ -663,31 +592,20 @@ export default function EscanearScreen() {
         return;
       }
 
-      if (!silent) showToast("err", "Leyendo MRZ...");
-      const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
-      if (barcodeResult.raw) {
-        await handleScan(barcodeResult.raw, {
-          skipBarcodeFallback: true,
-          serverParsed: barcodeResult.serverParsed,
-        });
-        return;
-      }
-
+      if (!silent) showToast("err", "Procesando la foto...");
+      // QR/PDF417 se leen directamente mientras la cámara está abierta.
+      // Este botón queda reservado para OCR/MRZ de la foto tomada por el usuario.
       const ocrResult = await readCameraWithOcr(imageBase64);
       if (ocrResult.raw && ocrResult.serverParsed?.cedula) {
         await handleScan(ocrResult.raw, {
-          skipBarcodeFallback: true,
           serverParsed: ocrResult.serverParsed,
         });
         return;
       }
 
-      const iaResult = await readCameraWithGemini(imageBase64);
-      if (iaResult?.cedula) {
-        await handleScan(iaResult.cedula, {
-          skipBarcodeFallback: true,
-          serverParsed: iaResult,
-        });
+      const geminiResult = await readCameraWithGemini(imageBase64);
+      if (geminiResult?.cedula) {
+        await handleScan(geminiResult.cedula, { serverParsed: geminiResult });
         return;
       }
 
@@ -698,19 +616,7 @@ export default function EscanearScreen() {
     } finally {
       cameraReadBusy.current = false;
     }
-  }, [captureCameraBase64, handleScan, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, showToast]);
-
-  // Modo automático: mientras la cámara está visible, intenta leer la licencia
-  // periódicamente sin exigir que el usuario pulse el botón de foto.
-  useEffect(() => {
-    if (mode !== "camera" || !isFocused || !cameraReady || !permission?.granted) return;
-    const timer = setInterval(() => {
-      if (!scanBusyRef.current && !cameraReadBusy.current && !barcodeLoadingRef.current) {
-        void captureAndDecodeBarcode(true);
-      }
-    }, 1800);
-    return () => clearInterval(timer);
-  }, [mode, isFocused, cameraReady, permission?.granted, captureAndDecodeBarcode]);
+  }, [captureCameraBase64, handleScan, readCameraWithOcr, readCameraWithGemini, showToast]);
 
   // Auto-lookup as user types in manual mode (debounced)
   useEffect(() => {
@@ -771,7 +677,7 @@ export default function EscanearScreen() {
           <View style={styles.statusRow}>
             <View style={[styles.dot, { backgroundColor: statusColor }]} />
             <Text testID="sync-status-indicator" style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
-            <Text style={styles.statusMeta}> · {activos} dispositivos · cola {queueSize}</Text>
+            <Text style={styles.statusMeta}>{queueSize > 0 ? " · sincronización pendiente" : " · sincronizado"}</Text>
           </View>
         </View>
         <View style={styles.topActions}>
@@ -847,12 +753,11 @@ export default function EscanearScreen() {
           ) : (
             <CameraView
   ref={cameraRef}
-  onCameraReady={() => setCameraReady(true)}
   style={ABSOLUTE_FILL}
   facing="back"
   autofocus="on"
   barcodeScannerSettings={{
-    barcodeTypes: ["pdf417", "qr", "datamatrix"],
+    barcodeTypes: ["pdf417", "qr"],
   }}
   onBarcodeScanned={scannerEnabled ? ({ raw, data, type }) => {
     const payload = scannedPayload(raw, data);
@@ -869,10 +774,17 @@ export default function EscanearScreen() {
     lastRawScanRef.current = { value: normalized, at: now };
     const hasDirectCedula = !!extractCedulaFromCameraPayload(normalized);
     if (!hasDirectCedula) {
+      // Algunas licencias traen la identidad dentro del PDF417 codificado y
+      // no exponen la cédula en el texto plano. Dejamos que el parser local
+      // intente resolver el payload completo antes de pedir una foto.
+      if (type === "pdf417" && normalized.length >= 20) {
+        void handleScan(normalized);
+        return;
+      }
       if (type === "qr") showToast("err", "QR detectado pero sin cédula legible. Usa PDF417, MRZ o manual.");
       return;
     }
-    void handleScan(normalized, { skipBarcodeFallback: true });
+    void handleScan(normalized);
               } : undefined}>
               <View style={styles.reticleOverlay} pointerEvents="none">
                 <View
@@ -891,21 +803,21 @@ export default function EscanearScreen() {
                     <View style={styles.mrzGuideLine} />
                   </View>
                 </View>
-                <Text style={styles.reticleHint}>PDF417 o QR lee directo. MRZ usa una foto solo al tocar.</Text>
+                <Text style={styles.reticleHint}>Alinea el documento dentro del marco y pulsa el botón para tomar una foto.</Text>
               </View>
               <View style={styles.captureBar}>
                 <TouchableOpacity
                   testID="decode-pdf417-photo-btn"
-                  style={[styles.captureBtn, (barcodeLoading || ocrLoading || iaLoading) && { opacity: 0.6 }]}
-                onPress={() => { void captureAndDecodeBarcode(false); }}
-                  disabled={barcodeLoading || ocrLoading || iaLoading}
+                  style={[styles.captureBtn, (ocrLoading || iaLoading) && { opacity: 0.6 }]}
+                  onPress={() => { void captureAndDecodeBarcode(false); }}
+                  disabled={ocrLoading || iaLoading}
                 >
-                  {barcodeLoading || ocrLoading || iaLoading ? (
+                  {ocrLoading || iaLoading ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
                     <>
-                      <Ionicons name="scan-circle" size={24} color="#fff" />
-                      <Text style={styles.captureBtnText}>Leer MRZ</Text>
+                      <Ionicons name="camera" size={24} color="#fff" />
+                      <Text style={styles.captureBtnText}>Tomar foto y leer</Text>
                     </>
                   )}
                 </TouchableOpacity>
@@ -1023,7 +935,7 @@ export default function EscanearScreen() {
       <View style={styles.recentWrap}>
         <View style={styles.recentHeader}>
           <Text style={styles.recentTitle}>Recientes</Text>
-          <Text style={styles.recentMeta}>{duplicadosBloqueados} duplicados bloqueados</Text>
+            {isAdmin && <Text style={styles.recentMeta}>{duplicadosBloqueados} duplicados bloqueados</Text>}
         </View>
         <FlatList
           data={recientes}

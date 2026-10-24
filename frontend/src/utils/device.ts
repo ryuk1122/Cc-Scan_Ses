@@ -1,5 +1,6 @@
 /**
- * Device ID: stable per install. Persisted in AsyncStorage via @/src/utils/storage.
+ * Installation ID: random, stable per install and kept in platform secure storage.
+ * Reinstalling can produce a new ID, which intentionally requires a fresh Admin PIN.
  */
 import { storage } from "@/src/utils/storage";
 
@@ -13,10 +14,10 @@ function rnd(len = 10): string {
 }
 
 export async function getDeviceId(): Promise<string> {
-  const existing = await storage.getItem<string>(KEY, "");
+  const existing = await storage.secureGet<string>(KEY, "");
   if (existing) return existing;
   const id = `dev_${rnd(12)}`;
-  await storage.setItem(KEY, id);
+  await storage.secureSet(KEY, id);
   return id;
 }
 

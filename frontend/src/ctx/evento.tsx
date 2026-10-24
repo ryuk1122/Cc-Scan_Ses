@@ -13,7 +13,7 @@ import React, {
   useRef,
   ReactNode,
 } from "react";
-import { api, wsUrl } from "@/src/utils/api";
+import { api, wsUrl, notifyAuthRevoked } from "@/src/utils/api";
 import { useSession } from "@/src/ctx/session";
 import { storage } from "@/src/utils/storage";
 import { getDeviceId, newNonce } from "@/src/utils/device";
@@ -41,7 +41,6 @@ type EventoCtxValue = {
   registros: Registro[];
   totalRegistros: number;
   misRegistros: number;
-  cedulasSet: Set<string>;
   wsStatus: "idle" | "connecting" | "online" | "offline";
   activos: number;
   duplicadosBloqueados: number;
@@ -166,23 +165,26 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       const saved = await storage.getItem<StoredEvento | null>(SELECTED_EVENT_KEY, null);
       if (cancelled || !saved?.id) return;
       const cached = (await storage.getItem<Registro[] | null>(`${REGISTROS_CACHE_PREFIX}${saved.id}`, null)) || [];
+      const visibleCached = user?.role === "admin"
+        ? cached
+        : cached.filter((r) => r.operator_email?.trim().toLowerCase() === user?.email?.trim().toLowerCase());
       const pending = ((await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [])
-        .filter((item) => item.evento_id === saved.id);
-      const visible = [...pending.map(queuedRegistro), ...cached.filter((r) => !pending.some((item) => item.cedula === r.cedula))]
+        .filter((item) => item.evento_id === saved.id && item.operator_email?.trim().toLowerCase() === user?.email?.trim().toLowerCase());
+      const visible = [...pending.map(queuedRegistro), ...visibleCached.filter((r) => !pending.some((item) => item.cedula === r.cedula))]
         .slice(0, REGISTROS_RECENT_LIMIT);
       setEventoId(saved.id);
       setEventoNombre(saved.nombre || "");
-      cedulasSetRef.current = new Set([...cached.map((r) => r.cedula), ...pending.map((r) => r.cedula)]);
+      cedulasSetRef.current = new Set([...visibleCached.map((r) => r.cedula), ...pending.map((r) => r.cedula)]);
       setRegistros(visible);
-      setTotalRegistros(cached.length);
-      setMisRegistros(cached.filter((r) => r.operator_email === user?.email).length + pending.filter((item) => item.operator_email === user?.email).length);
+      setTotalRegistros(visibleCached.length);
+      setMisRegistros(visibleCached.length + pending.filter((item) => item.operator_email?.trim().toLowerCase() === user?.email?.trim().toLowerCase()).length);
       setQueueSize(pending.length);
       forceRender((n) => n + 1);
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [user?.email, user?.role]);
 
   const addRegistro = useCallback((r: Registro, countAsNew = true) => {
     if (cedulasSetRef.current.has(r.cedula)) return;
@@ -295,10 +297,14 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           stopPing();
           setWsStatus("offline");
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           if (cancelled) return;
           stopPing();
           setWsStatus("offline");
+          if (event.code === 4401 || event.code === 4403) {
+            notifyAuthRevoked();
+            return;
+          }
           // retry in 2s
           if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
           reconnectTimer.current = setTimeout(connect, 2000);
@@ -452,7 +458,8 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (eventoId && token) {
-      void refreshRegistros();
+      const refreshTimer = setTimeout(() => { void refreshRegistros(); }, 0);
+      return () => clearTimeout(refreshTimer);
     }
   }, [eventoId, token, refreshRegistros]);
 
@@ -543,7 +550,6 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         registros,
         totalRegistros,
         misRegistros,
-        cedulasSet: cedulasSetRef.current,
         wsStatus,
         activos,
         duplicadosBloqueados,

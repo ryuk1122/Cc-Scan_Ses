@@ -377,9 +377,20 @@ def _decode_mrz_from_base64(image_base64: str) -> dict:
 
 
 def decode_identity_document_from_base64(image_base64: str, prefer_mrz: bool = False) -> dict:
-    # Los códigos 2D/PDF417 son mucho más rápidos y confiables que OCR.
-    # Aunque la pantalla prefiera MRZ, siempre intentamos primero el lector
-    # nativo para no hacer esperar al usuario en licencias que sí tienen código.
+    # La ruta de foto solicitada para MRZ no vuelve a ejecutar lectores de
+    # código: en la cámara en vivo QR/PDF417 ya se intentan sin tomar fotos.
+    if prefer_mrz:
+        mrz = _decode_mrz_from_base64(image_base64)
+        if mrz.get("cedula"):
+            return mrz
+        return {
+            "ok": False, "error": mrz.get("error") or "No se pudo leer la MRZ de la foto",
+            "raw": "", "cedula": "", "parsed": mrz.get("parsed") or {},
+            "format": "", "source": "", "candidates": [],
+            "raw_mrz": mrz.get("raw_mrz") or [], "mrz_valido": False,
+        }
+
+    # Esta es la ruta rápida de cámara: primero QR y enseguida PDF417; no OCR.
     qr = decode_qr_from_base64(image_base64)
     if qr.get("cedula"):
         return qr
@@ -389,21 +400,16 @@ def decode_identity_document_from_base64(image_base64: str, prefer_mrz: bool = F
         pdf417["source"] = "pdf417"
         return pdf417
 
-    # OCR MRZ queda como respaldo únicamente cuando no se encontró un código.
-    mrz = _decode_mrz_from_base64(image_base64)
-    if mrz.get("cedula"):
-        return mrz
-
     return {
         "ok": False,
-        "error": qr.get("error") or pdf417.get("error") or mrz.get("error") or "No se detecto PDF417, QR ni MRZ",
+        "error": qr.get("error") or pdf417.get("error") or "No se detecto PDF417 ni QR",
         "raw": "",
         "cedula": "",
-        "parsed": mrz.get("parsed") or {},
+        "parsed": {},
         "format": "",
         "source": "",
         "candidates": (pdf417.get("candidates") or [])[:3] + (qr.get("candidates") or [])[:3],
-        "raw_mrz": mrz.get("raw_mrz") or [],
+        "raw_mrz": [],
         "mrz_valido": False,
     }
 

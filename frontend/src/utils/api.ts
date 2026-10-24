@@ -11,9 +11,18 @@ const rawBase =
   "";
 const BASE = rawBase.replace(/\/+$/, "");
 const TOKEN_KEY = "cs_token";
-const API_TIMEOUT_MS = 45000;
+const API_TIMEOUT_MS = 30000;
 
 export type ApiError = { status: number; detail: any };
+let authRevokedHandler: (() => void) | null = null;
+
+export function setAuthRevokedHandler(handler: (() => void) | null): void {
+  authRevokedHandler = handler;
+}
+
+export function notifyAuthRevoked(): void {
+  authRevokedHandler?.();
+}
 
 async function getToken(): Promise<string | null> {
   return (await storage.secureGet<string>(TOKEN_KEY, "")) || null;
@@ -58,15 +67,20 @@ async function request<T>(path: string, options: RequestInit = {}, withAuth = tr
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
     const err: ApiError = { status: res.status, detail: data?.detail ?? data };
+    if (withAuth && res.status === 403 && (
+      err.detail === "Cuenta de operador desactivada por el administrador" ||
+      String(err.detail || "").includes("Dispositivo revocado") ||
+      String(err.detail || "").includes("debe iniciar sesión en la versión segura")
+    )) {
+      authRevokedHandler?.();
+    }
     throw err;
   }
   return data as T;
 }
 
 export const api = {
-  register: (body: { email: string; password: string; nombre: string }) =>
-    request<{ access_token: string; user: any }>("/auth/register", { method: "POST", body: JSON.stringify(body) }, false),
-  login: (body: { email: string; password: string }) =>
+  login: (body: { email: string; password: string; device_id: string; verification_pin?: string }) =>
     request<{ access_token: string; user: any }>("/auth/login", { method: "POST", body: JSON.stringify(body) }, false),
   me: () => request<any>("/auth/me"),
 
@@ -95,6 +109,16 @@ export const api = {
   afiliadosStats: () => request<{ total: number }>("/admin/afiliados/stats"),
   adminMetrics: (eventoId?: string) =>
     request<any>(`/admin/metrics${eventoId ? `?evento_id=${encodeURIComponent(eventoId)}` : ""}`),
+  listOperators: () => request<{ id: string; email: string; nombre: string; active: boolean; online: boolean; created_at?: string }[]>("/admin/operators"),
+  createOperator: (body: { email: string; password: string; nombre: string }) =>
+    request<{ id: string; email: string; nombre: string; active: boolean; pin: string; expires_in_minutes: number }>("/admin/operators", { method: "POST", body: JSON.stringify(body) }),
+  issueDevicePin: (operatorId: string) =>
+    request<{ ok: boolean; pin: string; expires_in_minutes: number; operator_email: string }>(`/admin/operators/${encodeURIComponent(operatorId)}/device-pin`, { method: "POST" }),
+  listOperatorDevices: () => request<{ device_id: string; user_id: string; email: string; nombre: string; active: boolean; created_at: string; last_seen_at: string }[]>("/admin/devices"),
+  revokeDevice: (deviceId: string) =>
+    request<{ ok: boolean; device_id: string; active: boolean }>(`/admin/devices/${encodeURIComponent(deviceId)}/active`, { method: "PATCH", body: JSON.stringify({ active: false }) }),
+  setOperatorActive: (id: string, active: boolean) =>
+    request<{ ok: boolean; id: string; active: boolean }>(`/admin/operators/${encodeURIComponent(id)}/active`, { method: "PATCH", body: JSON.stringify({ active }) }),
   adminIaStatus: () => request<any>("/admin/ia/status"),
   updateAfiliado: (cedula: string, body: any) =>
     request<any>(`/admin/afiliados/${encodeURIComponent(cedula)}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -116,13 +140,15 @@ export const api = {
     request<{ ok: boolean; cedula: string; texto_completo?: string; pipeline_usado?: string; gemini?: any; afiliado: any; parsed?: any; raw_mrz?: string[]; mrz_valido?: boolean; error?: string }>(
       "/ocr/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64, force_gemini: !!options.forceGemini }) },
+      true,
+      22000,
     ),
   barcodeCedula: (imageBase64: string, options: { preferMrz?: boolean } = {}) =>
     request<{ ok: boolean; cedula: string; raw: string; parsed?: any; format?: string; source?: string; raw_mrz?: string[]; mrz_valido?: boolean; candidates?: string[]; afiliado: any; error?: string }>(
       "/barcode/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64, prefer_mrz: !!options.preferMrz }) },
       true,
-      15000,
+      8000,
     ),
 
   // Admin registros

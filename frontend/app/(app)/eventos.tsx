@@ -20,6 +20,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "@/src/theme";
 import { errorMessage } from "@/src/utils/errors";
 import { api } from "@/src/utils/api";
+import { useSession } from "@/src/ctx/session";
 import { useEvento } from "@/src/ctx/evento";
 import EscanearScreen from "./escanear";
 
@@ -56,6 +57,8 @@ function normalizeEventDate(value: string): string | null {
 }
 
 export default function EventosScreen() {
+  const { user } = useSession();
+  const isAdmin = user?.role === "admin";
   const { selectEvento, eventoId } = useEvento();
   const [items, setItems] = useState<Evento[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,7 +131,7 @@ export default function EventosScreen() {
           <Text style={styles.title}>Escaner</Text>
           <Text style={styles.subtitle}>Selecciona evento y empieza a registrar</Text>
         </View>
-        <TouchableOpacity
+        {isAdmin && <TouchableOpacity
           testID="open-create-evento"
           style={styles.addBtn}
           onPress={() => {
@@ -137,7 +140,7 @@ export default function EventosScreen() {
           }}
         >
           <Ionicons name="add" size={22} color="#fff" />
-        </TouchableOpacity>
+        </TouchableOpacity>}
       </View>
 
       <FlatList
@@ -182,10 +185,10 @@ export default function EventosScreen() {
                 </Text>
               </View>
             </View>
-            <View style={styles.cardRight}>
+            {isAdmin && <View style={styles.cardRight}>
               <Text style={styles.cardCount}>{item.total_registros}</Text>
               <Text style={styles.cardCountLabel}>registros</Text>
-            </View>
+            </View>}
           </TouchableOpacity>
         )}
       />

@@ -17,7 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 from pymongo.errors import DuplicateKeyError
-from pymongo import UpdateOne
+from pymongo import DeleteOne, UpdateOne
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from pathlib import Path
@@ -28,10 +28,12 @@ import io
 import logging
 import os
 import re
+import secrets
 import unicodedata
 import uuid
 import csv as csv_lib
 import jwt
+import requests
 
 from cedula_parser import clean_cedula, extract_cedula, parse_pdf417
 from ocr_service import ocr_from_base64_async, ocr_dependency_status
@@ -71,6 +73,8 @@ BCRYPT_ROUNDS = int(os.environ.get("BCRYPT_ROUNDS", "10"))
 ALLOW_WIPE_AFILIADOS = parse_bool_env("ALLOW_WIPE_AFILIADOS", True)
 MONGO_CONNECT_TIMEOUT_MS = int(os.environ.get("MONGO_CONNECT_TIMEOUT_MS", "5000"))
 MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
 STARTUP_SETUP_MAX_ATTEMPTS = int(os.environ.get("STARTUP_SETUP_MAX_ATTEMPTS", "6"))
 STARTUP_SETUP_RETRY_SECONDS = float(os.environ.get("STARTUP_SETUP_RETRY_SECONDS", "5"))
 
@@ -96,6 +100,22 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    device_id: str = Field(default="", max_length=80)
+    verification_pin: str = Field(default="", max_length=20)
+
+
+class OperatorAccessUpdate(BaseModel):
+    active: bool
+
+
+class OperatorCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    nombre: str = Field(min_length=1, max_length=80)
+
+
+class DeviceAccessUpdate(BaseModel):
+    active: bool = False
 
 
 class TokenResponse(BaseModel):
@@ -179,6 +199,10 @@ def verify_password(pw: str, h: str) -> bool:
         return False
 
 
+def hash_device_pin(pin: str) -> str:
+    return hashlib.sha256(f"{JWT_SECRET}:{pin}".encode("utf-8")).hexdigest()
+
+
 def password_needs_update(h: str) -> bool:
     try:
         return pwd_ctx.needs_update(h)
@@ -196,10 +220,13 @@ async def update_password_hash(user_id: str, password: str) -> None:
         logger.warning("No se pudo actualizar el hash de password: %s", exc)
 
 
-def create_token(user_id: str, email: str, role: str) -> str:
+def create_token(user_id: str, email: str, role: str, device_id: str = "") -> str:
     exp = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
+    claims = {"sub": user_id, "email": email, "role": role, "exp": exp}
+    if device_id:
+        claims["device_id"] = device_id
     return jwt.encode(
-        {"sub": user_id, "email": email, "role": role, "exp": exp},
+        claims,
         JWT_SECRET,
         algorithm=JWT_ALGO,
     )
@@ -220,6 +247,17 @@ async def get_user_from_token(token: str) -> Dict[str, Any]:
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no existe")
+    if user.get("role") == "operator" and user.get("active", True) is False:
+        raise HTTPException(status_code=403, detail="Cuenta de operador desactivada por el administrador")
+    if user.get("role") == "operator":
+        device_id = str(payload.get("device_id") or "")
+        if not device_id:
+            raise HTTPException(status_code=403, detail="Este operador debe iniciar sesión en la versión segura con PIN de dispositivo")
+        device = await db.operator_devices.find_one({"device_id": device_id, "user_id": user_id, "active": True}, {"_id": 0, "device_id": 1})
+        if not device:
+            raise HTTPException(status_code=403, detail="Dispositivo revocado o no autorizado por el administrador")
+        user["device_id"] = device_id
+    user["security_version"] = 2
     return user
 
 
@@ -234,6 +272,18 @@ async def require_admin(current=Depends(get_current_user)) -> Dict[str, Any]:
     if current.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
     return current
+
+
+def operator_records_filter(evento_id: str, current: Dict[str, Any]) -> Dict[str, Any]:
+    """Scope operator-facing reads to the authenticated user's own scans."""
+    ownership = []
+    if current.get("id"):
+        ownership.append({"operator_id": str(current["id"])})
+    if current.get("email"):
+        ownership.append({"operator_email": str(current["email"]).strip().lower()})
+    if not ownership:
+        return {"evento_id": evento_id, "id": "__no_operator_match__"}
+    return {"evento_id": evento_id, "$or": ownership}
 
 
 async def require_admin_for_download(
@@ -270,11 +320,17 @@ class ConnectionManager:
         self.devices: Dict[int, Dict[str, str]] = {}
         self.lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket, evento_id: str, device_id: str) -> None:
+    async def connect(self, ws: WebSocket, evento_id: str, device_id: str, user: Dict[str, Any]) -> None:
         await ws.accept()
         async with self.lock:
             self.rooms.setdefault(evento_id, []).append(ws)
-            self.devices[id(ws)] = {"evento_id": evento_id, "device_id": device_id}
+            self.devices[id(ws)] = {
+                "evento_id": evento_id,
+                "device_id": device_id,
+                "user_id": str(user.get("id") or ""),
+                "email": str(user.get("email") or "").strip().lower(),
+                "role": str(user.get("role") or "operator"),
+            }
         await self.broadcast(evento_id, {
             "type": "device:conectado",
             "device_id": device_id,
@@ -305,11 +361,43 @@ class ConnectionManager:
     def active_count(self, evento_id: str) -> int:
         return len(self.rooms.get(evento_id, []))
 
+    def is_user_connected(self, user_id: str) -> bool:
+        return any(meta.get("user_id") == user_id for meta in self.devices.values())
+
+    async def close_user_connections(self, user_id: str) -> None:
+        active = [ws for room in self.rooms.values() for ws in room if self.devices.get(id(ws), {}).get("user_id") == user_id]
+        for ws in active:
+            try:
+                await ws.close(code=4403, reason="Acceso revocado por administrador")
+            except Exception:
+                logger.debug("WebSocket ya estaba cerrado al revocar operador %s", user_id)
+
+    async def close_device_connections(self, device_id: str) -> None:
+        active = [ws for room in self.rooms.values() for ws in room if self.devices.get(id(ws), {}).get("device_id") == device_id]
+        for ws in active:
+            try:
+                await ws.close(code=4403, reason="Dispositivo revocado por administrador")
+            except Exception:
+                logger.debug("WebSocket ya estaba cerrado al revocar dispositivo %s", device_id)
+
     async def broadcast(self, evento_id: str, message: Dict[str, Any]) -> None:
         dead: List[WebSocket] = []
         for ws in list(self.rooms.get(evento_id, [])):
+            recipient = self.devices.get(id(ws), {})
+            if recipient.get("role") != "admin":
+                kind = message.get("type", "")
+                # Operators get neither event-wide device/total updates nor other
+                # operators' scan identities and audit-related notifications.
+                if kind.startswith("device:") or kind in {"estado:inicial", "evento:limpiado", "registro:eliminado"}:
+                    continue
+                owner_email = str(message.get("operator_email") or "").strip().lower()
+                if kind in {"registro:nuevo", "registro:duplicado"} and owner_email != recipient.get("email"):
+                    continue
+                outgoing = message
+                if recipient.get("role") != "admin" and kind == "registro:duplicado":
+                    outgoing = {key: value for key, value in message.items() if key != "registro_original"}
             try:
-                await ws.send_json(message)
+                await ws.send_json(outgoing)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -324,6 +412,83 @@ startup_state: Dict[str, Any] = {
     "setup_error": "",
     "setup_completed_at": "",
 }
+
+
+async def enqueue_supabase_backup(entity_type: str, entity_id: str, payload: Dict[str, Any]) -> None:
+    """Persist a small backup outbox item; primary writes never depend on Supabase."""
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        return
+    backup_id = f"{entity_type}:{entity_id}"
+    try:
+        await db.backup_outbox.update_one(
+            {"backup_id": backup_id},
+            {"$set": {
+                "backup_id": backup_id, "entity_type": entity_type, "entity_id": str(entity_id),
+                "payload": payload, "updated_at": now_iso(), "next_attempt_at": datetime.now(timezone.utc),
+            }, "$setOnInsert": {"attempts": 0}},
+            upsert=True,
+        )
+    except Exception:
+        logger.exception("No se pudo guardar el respaldo pendiente de %s", backup_id)
+
+
+def _post_supabase_backup(rows: List[Dict[str, Any]]) -> None:
+    url = f"{SUPABASE_URL}/rest/v1/ccscan_backup"
+    response = requests.post(
+        url,
+        params={"on_conflict": "backup_id"},
+        headers={
+            "apikey": SUPABASE_SECRET_KEY,
+            "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=rows,
+        timeout=12,
+    )
+    response.raise_for_status()
+
+
+async def flush_supabase_backup_batch() -> int:
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        return 0
+    now = datetime.now(timezone.utc)
+    items = await db.backup_outbox.find({"next_attempt_at": {"$lte": now}}).sort("updated_at", 1).limit(50).to_list(50)
+    if not items:
+        return 0
+    rows = [{
+        "backup_id": item["backup_id"], "entity_type": item["entity_type"], "entity_id": item["entity_id"],
+        "payload": item["payload"], "backed_up_at": now_iso(),
+    } for item in items]
+    try:
+        await asyncio.to_thread(_post_supabase_backup, rows)
+        await db.backup_outbox.bulk_write([
+            DeleteOne({"backup_id": item["backup_id"], "updated_at": item.get("updated_at")})
+            for item in items
+        ], ordered=False)
+        return len(items)
+    except Exception as exc:
+        logger.warning("Respaldo Supabase no disponible; se reintentará: %s", exc)
+        for item in items:
+            attempts = int(item.get("attempts", 0)) + 1
+            delay = min(3600, 10 * (2 ** min(attempts, 8)))
+            await db.backup_outbox.update_one(
+                {"backup_id": item["backup_id"]},
+                {"$set": {"attempts": attempts, "next_attempt_at": now + timedelta(seconds=delay), "last_error": str(exc)[:300]}},
+            )
+        return 0
+
+
+async def _supabase_backup_worker() -> None:
+    if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
+        logger.info("Respaldo Supabase no configurado; la API principal sigue operativa.")
+        return
+    while True:
+        try:
+            await flush_supabase_backup_batch()
+        except Exception:
+            logger.exception("Error inesperado en el respaldo Supabase")
+        await asyncio.sleep(15)
 
 
 # ---------- Afiliados seed ----------
@@ -397,6 +562,12 @@ async def _setup() -> None:
     # Usuarios
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id",    unique=True)
+    await db.operator_devices.create_index("device_id", unique=True)
+    await db.operator_devices.create_index([("user_id", 1), ("active", 1)])
+    await db.device_enrollment_pins.create_index("expires_at", expireAfterSeconds=0)
+    await db.device_enrollment_pins.create_index([("operator_id", 1), ("pin_hash", 1)])
+    await db.backup_outbox.create_index("backup_id", unique=True)
+    await db.backup_outbox.create_index("next_attempt_at")
     # Eventos
     await db.eventos.create_index("id", unique=True)
     # Registros
@@ -448,7 +619,9 @@ async def _setup_until_ready() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_task = asyncio.create_task(_setup_until_ready())
+    backup_task = asyncio.create_task(_supabase_backup_worker())
     app.state.setup_task = setup_task
+    app.state.backup_task = backup_task
     try:
         yield
     finally:
@@ -458,12 +631,18 @@ async def lifespan(app: FastAPI):
                 await setup_task
             except asyncio.CancelledError:
                 pass
+        if not backup_task.done():
+            backup_task.cancel()
+            try:
+                await backup_task
+            except asyncio.CancelledError:
+                pass
     client.close()
     logger.info("Conexion MongoDB cerrada.")
 
 
 # ---------- App ----------
-app = FastAPI(title="CedulaScan Pro API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="CedulaScan Pro API", version="2.2.0", lifespan=lifespan)
 api = APIRouter(prefix="/api")
 
 app.add_middleware(
@@ -478,27 +657,7 @@ app.add_middleware(
 # ---------- Auth ----------
 @api.post("/auth/register", response_model=TokenResponse, status_code=201)
 async def register(body: UserRegister):
-    existing = await db.users.find_one({"email": body.email.lower()})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email ya registrado")
-    user_id = str(uuid.uuid4())
-    doc = {
-        "id":            user_id,
-        "email":         body.email.lower(),
-        "nombre":        body.nombre,
-        "password_hash": hash_password(body.password),
-        "role":          "operator",
-        "created_at":    now_iso(),
-    }
-    try:
-        await db.users.insert_one(doc)
-    except DuplicateKeyError:
-        raise HTTPException(status_code=400, detail="Email ya registrado")
-    token = create_token(user_id, doc["email"], doc["role"])
-    return TokenResponse(
-        access_token=token,
-        user={"id": user_id, "email": doc["email"], "nombre": doc["nombre"], "role": doc["role"]},
-    )
+    raise HTTPException(status_code=403, detail="El registro público está deshabilitado. Solicita la cuenta al administrador.")
 
 
 @api.post("/auth/login", response_model=TokenResponse)
@@ -506,16 +665,57 @@ async def login(body: UserLogin):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    if user.get("role") == "operator" and user.get("active", True) is False:
+        raise HTTPException(status_code=403, detail="Cuenta de operador desactivada por el administrador")
+    role = user.get("role", "operator")
+    device_id = str(body.device_id or "").strip()
+    if role == "operator":
+        if len(device_id) < 8:
+            raise HTTPException(status_code=403, detail="No se pudo identificar esta instalación. Actualiza la aplicación.")
+        device = await db.operator_devices.find_one({"device_id": device_id}, {"_id": 0})
+        if device and device.get("user_id") != user["id"]:
+            raise HTTPException(status_code=403, detail="Este identificador ya está vinculado a otra cuenta. Contacta al administrador.")
+        if device and device.get("active") is False:
+            raise HTTPException(status_code=403, detail="Dispositivo revocado por el administrador. Solicita autorización para otra instalación.")
+        if not device:
+            pin = str(body.verification_pin or "").strip()
+            pin_doc = await db.device_enrollment_pins.find_one({
+                "operator_id": user["id"], "pin_hash": hash_device_pin(pin),
+                "used_at": None, "expires_at": {"$gt": datetime.now(timezone.utc)},
+                "attempts": {"$lt": 5},
+            }) if pin else None
+            if not pin_doc:
+                if pin:
+                    await db.device_enrollment_pins.update_one(
+                        {"operator_id": user["id"], "used_at": None},
+                        {"$inc": {"attempts": 1}},
+                    )
+                raise HTTPException(status_code=403, detail="Esta instalación requiere el PIN de verificación de un solo uso entregado por Admin.")
+            consumed = await db.device_enrollment_pins.update_one(
+                {"_id": pin_doc["_id"], "used_at": None, "attempts": {"$lt": 5}},
+                {"$set": {"used_at": datetime.now(timezone.utc)}},
+            )
+            if consumed.modified_count != 1:
+                raise HTTPException(status_code=403, detail="El PIN ya fue usado. Solicita uno nuevo a Admin.")
+            await db.operator_devices.insert_one({
+                "device_id": device_id, "user_id": user["id"], "email": user["email"],
+                "nombre": user.get("nombre", ""), "active": True,
+                "created_at": now_iso(), "last_seen_at": now_iso(),
+            })
+        else:
+            await db.operator_devices.update_one({"device_id": device_id, "user_id": user["id"], "active": True}, {"$set": {"last_seen_at": now_iso()}})
     if password_needs_update(user["password_hash"]):
         asyncio.create_task(update_password_hash(user["id"], body.password))
-    token = create_token(user["id"], user["email"], user.get("role", "operator"))
+    token = create_token(user["id"], user["email"], role, device_id if role == "operator" else "")
     return TokenResponse(
         access_token=token,
         user={
             "id":     user["id"],
             "email":  user["email"],
             "nombre": user["nombre"],
-            "role":   user.get("role", "operator"),
+            "role":   role,
+            "security_version": 2,
+            **({"device_id": device_id} if role == "operator" else {}),
         },
     )
 
@@ -660,6 +860,112 @@ async def admin_metrics(evento_id: str = "", current=Depends(require_admin)):
 @api.get("/admin/ia/status")
 async def admin_ia_status(current=Depends(require_admin)):
     return {"gemini": gemini_dependency_status()}
+
+
+@api.get("/admin/operators")
+async def list_operators(current=Depends(require_admin)):
+    users = await db.users.find(
+        {"role": "operator"},
+        {"_id": 0, "id": 1, "email": 1, "nombre": 1, "active": 1, "created_at": 1},
+    ).sort("created_at", -1).limit(1000).to_list(1000)
+    return [{**item, "active": item.get("active", True), "online": manager.is_user_connected(str(item.get("id") or ""))} for item in users]
+
+
+@api.post("/admin/operators", status_code=201)
+async def create_operator(body: OperatorCreate, current=Depends(require_admin)):
+    email = body.email.lower().strip()
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        raise HTTPException(status_code=409, detail="Ese correo ya tiene una cuenta")
+    doc = {
+        "id": str(uuid.uuid4()), "email": email, "nombre": body.nombre.strip(),
+        "password_hash": hash_password(body.password), "role": "operator", "active": True,
+        "created_at": now_iso(), "created_by": current["id"],
+    }
+    try:
+        await db.users.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Ese correo ya tiene una cuenta")
+    await db.event_store.insert_one({
+        "event_type": "OPERADOR_CREADO", "aggregate_id": "admin/operators",
+        "data": {"operator_id": doc["id"], "operator_email": email, "por": current.get("email")},
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000), "created_at": now_iso(),
+    })
+    await enqueue_supabase_backup("operator", doc["id"], {"id": doc["id"], "email": email, "nombre": doc["nombre"], "active": True, "created_at": doc["created_at"]})
+    # Issue the first-device PIN during account creation so Admin can hand it
+    # to the operator immediately. Only the hash is persisted.
+    pin = f"{secrets.randbelow(1_000_000):06d}"
+    now = datetime.now(timezone.utc)
+    await db.device_enrollment_pins.insert_one({
+        "operator_id": doc["id"], "pin_hash": hash_device_pin(pin), "attempts": 0,
+        "created_by": current["id"], "created_at": now,
+        "expires_at": now + timedelta(minutes=10), "used_at": None,
+    })
+    return {
+        "id": doc["id"], "email": email, "nombre": doc["nombre"], "active": True,
+        "pin": pin, "expires_in_minutes": 10,
+    }
+
+
+@api.post("/admin/operators/{operator_id}/device-pin")
+async def issue_device_pin(operator_id: str, current=Depends(require_admin)):
+    operator = await db.users.find_one({"id": operator_id, "role": "operator", "active": True}, {"_id": 0, "id": 1, "email": 1})
+    if not operator:
+        raise HTTPException(status_code=404, detail="Operador activo no encontrado")
+    pin = f"{secrets.randbelow(1_000_000):06d}"
+    now = datetime.now(timezone.utc)
+    await db.device_enrollment_pins.update_many(
+        {"operator_id": operator_id, "used_at": None},
+        {"$set": {"used_at": now}},
+    )
+    await db.device_enrollment_pins.insert_one({
+        "operator_id": operator_id, "pin_hash": hash_device_pin(pin), "attempts": 0,
+        "created_by": current["id"], "created_at": now,
+        "expires_at": now + timedelta(minutes=10), "used_at": None,
+    })
+    return {"ok": True, "pin": pin, "expires_in_minutes": 10, "operator_email": operator["email"]}
+
+
+@api.get("/admin/devices")
+async def list_operator_devices(current=Depends(require_admin)):
+    return await db.operator_devices.find({}, {"_id": 0}).sort("last_seen_at", -1).limit(2000).to_list(2000)
+
+
+@api.patch("/admin/devices/{device_id}/active")
+async def set_device_active(device_id: str, body: DeviceAccessUpdate, current=Depends(require_admin)):
+    device = await db.operator_devices.find_one({"device_id": device_id}, {"_id": 0, "user_id": 1, "active": 1, "email": 1})
+    if not device:
+        raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+    if body.active:
+        raise HTTPException(status_code=400, detail="Un dispositivo revocado no se puede reactivar. Autoriza una instalación nueva con PIN.")
+    await db.operator_devices.update_one({"device_id": device_id}, {"$set": {"active": False, "revoked_at": now_iso(), "revoked_by": current["id"]}})
+    await db.event_store.insert_one({
+        "event_type": "DISPOSITIVO_REVOCADO", "aggregate_id": "admin/devices",
+        "data": {"device_id": device_id, "operator_id": device["user_id"], "operator_email": device.get("email"), "por": current.get("email")},
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000), "created_at": now_iso(),
+    })
+    await manager.close_device_connections(device_id)
+    await enqueue_supabase_backup("device_action", f"{device_id}:{uuid.uuid4().hex}", {"device_id": device_id, "operator_email": device.get("email"), "action": "revoked", "at": now_iso(), "by": current.get("email")})
+    return {"ok": True, "device_id": device_id, "active": False}
+
+
+@api.patch("/admin/operators/{operator_id}/active")
+async def set_operator_active(operator_id: str, body: OperatorAccessUpdate, current=Depends(require_admin)):
+    operator = await db.users.find_one({"id": operator_id}, {"_id": 0, "id": 1, "email": 1, "role": 1, "active": 1})
+    if not operator or operator.get("role") != "operator":
+        raise HTTPException(status_code=404, detail="Operador no encontrado")
+    await db.users.update_one({"id": operator_id, "role": "operator"}, {"$set": {"active": body.active}})
+    event_type = "OPERADOR_ACTIVADO" if body.active else "OPERADOR_DESACTIVADO"
+    await db.event_store.insert_one({
+        "event_type": event_type,
+        "aggregate_id": "admin/operators",
+        "data": {"operator_id": operator_id, "operator_email": operator.get("email"), "por": current.get("email")},
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "created_at": now_iso(),
+    })
+    if not body.active:
+        await manager.close_user_connections(operator_id)
+    await enqueue_supabase_backup("operator", operator_id, {"id": operator_id, "email": operator.get("email"), "active": body.active, "updated_at": now_iso()})
+    return {"ok": True, "id": operator_id, "active": body.active}
 
 
 @api.post("/admin/afiliados/import")
@@ -1065,7 +1371,7 @@ async def wipe_afiliados(confirm: str = Query("", max_length=64), current=Depend
 
 # ---------- Eventos ----------
 @api.post("/eventos", response_model=EventoOut, status_code=201)
-async def crear_evento(body: EventoCreate, current=Depends(get_current_user)):
+async def crear_evento(body: EventoCreate, current=Depends(require_admin)):
     eid = str(uuid.uuid4())
     doc = {
         "id": eid, "nombre": body.nombre, "fecha": body.fecha,
@@ -1073,6 +1379,7 @@ async def crear_evento(body: EventoCreate, current=Depends(get_current_user)):
         "activo": True, "created_by": current["id"], "created_at": now_iso(),
     }
     await db.eventos.insert_one(doc)
+    await enqueue_supabase_backup("event", eid, {k: v for k, v in doc.items() if k not in {"_id", "created_by"}})
     return EventoOut(**{k: v for k, v in doc.items() if k != "_id"}, total_registros=0)
 
 
@@ -1081,7 +1388,7 @@ async def listar_eventos(current=Depends(get_current_user)):
     eventos = await db.eventos.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
     out: List[EventoOut] = []
     for e in eventos:
-        total = await db.registros.count_documents({"evento_id": e["id"]})
+        total = await db.registros.count_documents({"evento_id": e["id"]}) if current.get("role") == "admin" else 0
         out.append(EventoOut(
             id=e["id"], nombre=e["nombre"], fecha=e["fecha"], lugar=e.get("lugar", ""),
             descripcion=e.get("descripcion", ""), activo=e.get("activo", True),
@@ -1095,7 +1402,7 @@ async def obtener_evento(evento_id: str, current=Depends(get_current_user)):
     e = await db.eventos.find_one({"id": evento_id}, {"_id": 0})
     if not e:
         raise HTTPException(status_code=404, detail="Evento no existe")
-    total = await db.registros.count_documents({"evento_id": evento_id})
+    total = await db.registros.count_documents({"evento_id": evento_id}) if current.get("role") == "admin" else 0
     return {**e, "total_registros": total}
 
 
@@ -1106,6 +1413,7 @@ async def eliminar_evento(evento_id: str, confirm: str = Query("", max_length=80
     await db.eventos.delete_one({"id": evento_id})
     r = await db.registros.delete_many({"evento_id": evento_id})
     await db.event_store.delete_many({"aggregate_id": evento_id})
+    await enqueue_supabase_backup("event", evento_id, {"id": evento_id, "deleted": True, "deleted_at": now_iso(), "by": current.get("email")})
     return {"ok": True, "registros_borrados": r.deleted_count}
 
 
@@ -1129,6 +1437,7 @@ async def limpiar_registros_evento(evento_id: str, confirm: str = Query("", max_
         "timestamp":  int(datetime.now(timezone.utc).timestamp() * 1000),
         "created_at": now_iso(),
     })
+    await enqueue_supabase_backup("event_action", f"{evento_id}:clear:{uuid.uuid4().hex}", {"evento_id": evento_id, "action": "records_cleared", "records_deleted": r.deleted_count, "by": current.get("email"), "at": now_iso()})
     await manager.broadcast(evento_id, {
         "type":    "evento:limpiado",
         "mensaje": "Registros del evento han sido limpiados por el administrador",
@@ -1142,6 +1451,20 @@ async def estado_evento(evento_id: str, current=Depends(get_current_user)):
     e = await db.eventos.find_one({"id": evento_id})
     if not e:
         raise HTTPException(status_code=404, detail="Evento no existe")
+    if current.get("role") != "admin":
+        mine = operator_records_filter(evento_id, current)
+        total = await db.registros.count_documents(mine)
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        today_count = await db.registros.count_documents({**mine, "created_at": {"$gte": today_iso}})
+        return {
+            "total": total,
+            "hoy": today_count,
+            "duplicados_detectados": 0,
+            "afiliados": 0,
+            "no_afiliados": 0,
+            "dispositivos_usados": 0,
+            "dispositivos_activos": 0,
+        }
     total      = await db.registros.count_documents({"evento_id": evento_id})
     today_iso  = datetime.now(timezone.utc).date().isoformat()
     hoy        = await db.registros.count_documents({"evento_id": evento_id, "created_at": {"$gte": today_iso}})
@@ -1167,7 +1490,8 @@ async def listar_registros(
     limit: int = Query(500, ge=1, le=1000),
     skip: int = Query(0, ge=0),
 ):
-    docs = await db.registros.find({"evento_id": evento_id}, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    query = {"evento_id": evento_id} if current.get("role") == "admin" else operator_records_filter(evento_id, current)
+    docs = await db.registros.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
     return docs
 
 
@@ -1192,12 +1516,13 @@ async def contar_mis_registros(evento_id: str, current=Depends(get_current_user)
 
 @api.get("/eventos/{evento_id}/cedulas")
 async def listar_cedulas_evento(evento_id: str, current=Depends(get_current_user)):
-    cedulas = await db.registros.distinct("cedula", {"evento_id": evento_id})
+    query = {"evento_id": evento_id} if current.get("role") == "admin" else operator_records_filter(evento_id, current)
+    cedulas = await db.registros.distinct("cedula", query)
     return [str(cedula) for cedula in cedulas if cedula]
 
 
 @api.get("/eventos/{evento_id}/auditoria")
-async def auditoria(evento_id: str, current=Depends(get_current_user), limit: int = 300):
+async def auditoria(evento_id: str, current=Depends(require_admin), limit: int = 300):
     docs = await db.event_store.find({"aggregate_id": evento_id}, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return docs
 
@@ -1374,6 +1699,7 @@ async def escanear(
             "type":             "registro:duplicado",
             "cedula":           cedula_norm,
             "device_id":        body.device_id,
+            "operator_email":   current["email"],
             "registro_original": existing,
             "mensaje":          f"Cédula {cedula_norm} ya registrada",
             "ts":               int(datetime.now(timezone.utc).timestamp() * 1000),
@@ -1464,6 +1790,7 @@ async def escanear(
             "type":             "registro:duplicado",
             "cedula":           cedula_norm,
             "device_id":        body.device_id,
+            "operator_email":   current["email"],
             "registro_original": winner,
             "mensaje":          f"Cédula {cedula_norm} ya registrada (race)",
             "ts":               ts_ms,
@@ -1486,6 +1813,14 @@ async def escanear(
         "dedup_hash":   dedup_hash,
     }
     response = {"ok": True, "registro": payload_out, "afiliado_encontrado": es_afiliado}
+    # Secondary backup contains only fields needed to recover the event list;
+    # raw barcode, OCR image and unrelated member contact data are excluded.
+    await enqueue_supabase_backup("registration", payload_out.get("id") or idem_key, {
+        key: payload_out.get(key) for key in (
+            "id", "cedula", "nombre", "evento_id", "sede", "municipio", "cargo",
+            "operator_email", "device_id", "timestamp", "created_at", "es_afiliado",
+        )
+    })
     # Audit and idempotency persistence are independent after the registration
     # is safely inserted. Persist them together without changing the response.
     await asyncio.gather(
@@ -1496,7 +1831,10 @@ async def escanear(
             upsert=True,
         ),
     )
-    await manager.broadcast(body.evento_id, {"type": "registro:nuevo", "registro": payload_out, "ts": ts_ms})
+    await manager.broadcast(body.evento_id, {
+        "type": "registro:nuevo", "registro": payload_out,
+        "operator_email": current["email"], "ts": ts_ms,
+    })
     return response
 
 
@@ -1701,6 +2039,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
         await manager.broadcast(evento_id, {
             "type": "registro:duplicado",
             "cedula": cedula_limpia,
+            "operator_email": current["email"],
             "mensaje": f"La cédula {cedula_limpia} ya fue registrada",
             "ts": int(datetime.now(timezone.utc).timestamp() * 1000)
         })
@@ -1758,6 +2097,7 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
         await manager.broadcast(evento_id, {
             "type": "registro:nuevo",
             "data": doc_registro,
+            "operator_email": current["email"],
             "ts": int(datetime.now(timezone.utc).timestamp() * 1000)
         })
         
@@ -1779,8 +2119,8 @@ async def ws_evento(websocket: WebSocket, evento_id: str, token: str = "", devic
     Maneja la suscripción en tiempo real de los clientes al evento utilizando la lógica original.
     """
     try:
-        payload = decode_token(token)
-        user_email = payload.get("email", "anon")
+        user = await get_user_from_token(token)
+        user_email = user.get("email", "anon")
     except Exception:
         await websocket.close(code=4401)
         return
@@ -1791,15 +2131,20 @@ async def ws_evento(websocket: WebSocket, evento_id: str, token: str = "", devic
         return
 
     dev = device_id or f"dev_{uuid.uuid4().hex[:8]}"
-    await manager.connect(websocket, evento_id, dev)
-    
-    total = await db.registros.count_documents({"evento_id": evento_id})
+    await manager.connect(websocket, evento_id, dev, user)
+
+    if user.get("role") == "admin":
+        total = await db.registros.count_documents({"evento_id": evento_id})
+        active_count = manager.active_count(evento_id)
+    else:
+        total = await db.registros.count_documents(operator_records_filter(evento_id, user))
+        active_count = 0
     
     await websocket.send_json({
         "type": "estado:inicial",
         "total": total,
-        "activos": manager.active_count(evento_id),
-        "operator": user_email,
+        "activos": active_count,
+        "operator": user_email if user.get("role") == "admin" else "operator",
         "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
     })
     
