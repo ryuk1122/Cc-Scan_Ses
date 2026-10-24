@@ -489,10 +489,15 @@ async def _supabase_backup_worker() -> None:
         return
     while True:
         SUPABASE_BACKUP_WAKEUP.clear()
+        sent = 0
         try:
-            await flush_supabase_backup_batch()
+            sent = await flush_supabase_backup_batch()
         except Exception:
             logger.exception("Error inesperado en el respaldo Supabase")
+        # Drain a backlog in consecutive batches of 50 instead of adding a
+        # 15-second pause between each batch.
+        if sent >= 50:
+            continue
         try:
             await asyncio.wait_for(SUPABASE_BACKUP_WAKEUP.wait(), timeout=15)
         except asyncio.TimeoutError:
