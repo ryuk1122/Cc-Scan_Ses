@@ -1892,7 +1892,7 @@ async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)
 # ---------- Health ----------
 @api.get("/")
 async def root():
-    return {"service": "CedulaScan Pro", "status": "ok", "version": "2.1.0"}
+    return {"service": "CedulaScan Pro", "status": "ok", "version": app.version}
 
 
 @api.get("/health")
@@ -1901,7 +1901,7 @@ async def health():
         "ok": True,
         "service": "CedulaScan Pro",
         "status": "live",
-        "version": "2.1.0",
+        "version": app.version,
         "database_ready": startup_state["database_ready"],
     }
 

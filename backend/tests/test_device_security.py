@@ -82,3 +82,8 @@ def test_public_operator_registration_is_disabled():
         assert "administrador" in exc.detail
     else:
         raise AssertionError("Public operator registration must be disabled")
+
+
+def test_health_versions_match_the_running_api_version():
+    assert asyncio.run(server.root())["version"] == server.app.version
+    assert asyncio.run(server.health())["version"] == server.app.version
