@@ -13,6 +13,7 @@ import React, {
   useRef,
   ReactNode,
 } from "react";
+import { AppState } from "react-native";
 import { api, wsUrl, notifyAuthRevoked } from "@/src/utils/api";
 import { useSession } from "@/src/ctx/session";
 import { storage } from "@/src/utils/storage";
@@ -119,7 +120,7 @@ function withQueueLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 function retryDelay(attempts: number): number {
-  return Math.min(5 * 60_000, 5_000 * 2 ** Math.min(attempts, 6));
+  return Math.min(30_000, 2_000 * 2 ** Math.max(0, attempts - 1));
 }
 
 function scanErrorMessage(err: any, fallback: string): string {
@@ -146,6 +147,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   const [lastSuccess, setLastSuccess] = useState<EventoCtxValue["lastSuccess"]>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const forceFlushRequestedRef = useRef(false);
   const reconnectTimer = useRef<any>(null);
   const pingTimer = useRef<any>(null);
   const deviceIdRef = useRef<string>("");
@@ -332,7 +334,8 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   }, [eventoId, token, addRegistro]);
 
   // Offline queue flusher
-  const flushQueue = useCallback(async () => {
+  const flushQueue = useCallback(async (force = false) => {
+    if (force) forceFlushRequestedRef.current = true;
     if (isFlushingRef.current) return;
     isFlushingRef.current = true;
     try {
@@ -340,7 +343,9 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       const q = (await storage.getItem<QueueItem[] | null>(QUEUE_KEY, null)) || [];
       setQueueSize(q.length);
       const now = Date.now();
-      const due = q.filter((item) => !item.next_attempt_at || item.next_attempt_at <= now).slice(0, 3);
+      const ignoreBackoff = forceFlushRequestedRef.current;
+      forceFlushRequestedRef.current = false;
+      const due = q.filter((item) => ignoreBackoff || !item.next_attempt_at || item.next_attempt_at <= now).slice(0, 3);
       if (!due.length) break;
       let persistenceFailed = false;
       await Promise.all(due.map(async (item) => {
@@ -387,9 +392,22 @@ export function EventoProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (wsStatus === "online") {
-      flushQueue();
+      flushQueue(true);
     }
   }, [wsStatus, flushQueue]);
+
+  // Immediately retry stored scans when the operator returns to the app or
+  // signs in again; do not leave entries waiting behind an old retry timer.
+  useEffect(() => {
+    if (token) void flushQueue(true);
+  }, [token, flushQueue]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active" && token) void flushQueue(true);
+    });
+    return () => subscription.remove();
+  }, [token, flushQueue]);
 
   // Periodic queue retry
   useEffect(() => {
@@ -529,7 +547,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
       setLastSuccess({ cedula, ts: Date.now() });
       // Network delivery runs in the background; the camera is immediately
       // available for the next person. The write-ahead copy is already durable.
-      void flushQueue();
+      void flushQueue(true);
       return { ok: true, mensaje: "Guardado en este teléfono; sincronizando con el servidor.", registro: local };
     },
     [eventoId, addRegistro, flushQueue, user?.email],
