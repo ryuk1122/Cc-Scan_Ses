@@ -377,24 +377,22 @@ def _decode_mrz_from_base64(image_base64: str) -> dict:
 
 
 def decode_identity_document_from_base64(image_base64: str, prefer_mrz: bool = False) -> dict:
-    if prefer_mrz:
-        mrz = _decode_mrz_from_base64(image_base64)
-        if mrz.get("cedula"):
-            return mrz
-
+    # Los códigos 2D/PDF417 son mucho más rápidos y confiables que OCR.
+    # Aunque la pantalla prefiera MRZ, siempre intentamos primero el lector
+    # nativo para no hacer esperar al usuario en licencias que sí tienen código.
     qr = decode_qr_from_base64(image_base64)
     if qr.get("cedula"):
         return qr
-
-    if not prefer_mrz:
-        mrz = _decode_mrz_from_base64(image_base64)
-        if mrz.get("cedula"):
-            return mrz
 
     pdf417 = decode_barcode_from_base64(image_base64)
     if pdf417.get("cedula"):
         pdf417["source"] = "pdf417"
         return pdf417
+
+    # OCR MRZ queda como respaldo únicamente cuando no se encontró un código.
+    mrz = _decode_mrz_from_base64(image_base64)
+    if mrz.get("cedula"):
+        return mrz
 
     return {
         "ok": False,

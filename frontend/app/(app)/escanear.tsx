@@ -519,7 +519,23 @@ export default function EscanearScreen() {
               raw: rawToUse,
             }
           : parsePdf417(rawToUse);
-        const tryImageFallback = async (_startMessage: string): Promise<boolean> => false;
+        const tryImageFallback = async (startMessage: string): Promise<boolean> => {
+          if (mode !== "camera") return false;
+          showToast("err", startMessage);
+          const ocr = await readCameraWithOcr();
+          if (ocr.raw && ocr.serverParsed?.cedula) {
+            rawToUse = ocr.raw;
+            inheritedServerParsed = ocr.serverParsed;
+            return true;
+          }
+          const ia = await readCameraWithGemini();
+          if (ia?.cedula) {
+            rawToUse = ia.cedula;
+            inheritedServerParsed = ia;
+            return true;
+          }
+          return false;
+        };
         if (!canUseServerParsed() && !isReliableBarcode(rawToUse, mode)) {
           if (mode === "camera") {
             const recovered = await tryImageFallback("Codigo incompleto. Intentando con IA...");
@@ -634,20 +650,20 @@ export default function EscanearScreen() {
         if (mode === "camera") rearmScanner();
       }
     },
-    [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner],
+    [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner, readCameraWithOcr, readCameraWithGemini],
   );
 
-  const captureAndDecodeBarcode = useCallback(async () => {
+  const captureAndDecodeBarcode = useCallback(async (silent = false) => {
     if (!cameraRef.current || cameraReadBusy.current || scanBusyRef.current) return;
     cameraReadBusy.current = true;
     try {
       const imageBase64 = await captureCameraBase64(0.65);
       if (!imageBase64) {
-        showToast("err", "No pude tomar la foto. Intenta de nuevo.");
+        if (!silent) showToast("err", "No pude tomar la imagen. Intenta de nuevo.");
         return;
       }
 
-      showToast("err", "Leyendo MRZ...");
+      if (!silent) showToast("err", "Leyendo MRZ...");
       const barcodeResult = await readCameraBarcode(false, imageBase64, { preferMrz: true });
       if (barcodeResult.raw) {
         await handleScan(barcodeResult.raw, {
@@ -657,14 +673,44 @@ export default function EscanearScreen() {
         return;
       }
 
+      const ocrResult = await readCameraWithOcr(imageBase64);
+      if (ocrResult.raw && ocrResult.serverParsed?.cedula) {
+        await handleScan(ocrResult.raw, {
+          skipBarcodeFallback: true,
+          serverParsed: ocrResult.serverParsed,
+        });
+        return;
+      }
+
+      const iaResult = await readCameraWithGemini(imageBase64);
+      if (iaResult?.cedula) {
+        await handleScan(iaResult.cedula, {
+          skipBarcodeFallback: true,
+          serverParsed: iaResult,
+        });
+        return;
+      }
+
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      showToast("err", "MRZ no legible o sin dígitos de control válidos. Reintenta la foto o usa QR/PDF417.");
+      if (!silent) showToast("err", "No pude leer la MRZ. Alinea las tres líneas, evita reflejos y acerca la licencia.");
     } catch {
-      showToast("err", "No pude validar la MRZ. Reintenta la foto o usa QR/PDF417.");
+      if (!silent) showToast("err", "No pude validar la MRZ. Alinea la licencia frente a la cámara.");
     } finally {
       cameraReadBusy.current = false;
     }
-  }, [captureCameraBase64, handleScan, readCameraBarcode, showToast]);
+  }, [captureCameraBase64, handleScan, readCameraBarcode, readCameraWithOcr, readCameraWithGemini, showToast]);
+
+  // Modo automático: mientras la cámara está visible, intenta leer la licencia
+  // periódicamente sin exigir que el usuario pulse el botón de foto.
+  useEffect(() => {
+    if (mode !== "camera" || !isFocused || !cameraReady || !permission?.granted) return;
+    const timer = setInterval(() => {
+      if (!scanBusyRef.current && !cameraReadBusy.current && !barcodeLoadingRef.current) {
+        void captureAndDecodeBarcode(true);
+      }
+    }, 1800);
+    return () => clearInterval(timer);
+  }, [mode, isFocused, cameraReady, permission?.granted, captureAndDecodeBarcode]);
 
   // Auto-lookup as user types in manual mode (debounced)
   useEffect(() => {
@@ -851,7 +897,7 @@ export default function EscanearScreen() {
                 <TouchableOpacity
                   testID="decode-pdf417-photo-btn"
                   style={[styles.captureBtn, (barcodeLoading || ocrLoading || iaLoading) && { opacity: 0.6 }]}
-                  onPress={captureAndDecodeBarcode}
+                onPress={() => { void captureAndDecodeBarcode(false); }}
                   disabled={barcodeLoading || ocrLoading || iaLoading}
                 >
                   {barcodeLoading || ocrLoading || iaLoading ? (

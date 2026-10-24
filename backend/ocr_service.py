@@ -154,6 +154,66 @@ _NUMBER_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LICENSE_MARKER_RE = re.compile(r"LICENCIA\s+DE\s+CONDUCCI[ÓO]N", re.IGNORECASE)
+_LICENSE_NUMBER_RE = re.compile(r"(?:N(?:O|º|°)?\.?|NUMERO)\s*[:#-]?\s*([0-9][0-9\s.-]{5,14})", re.IGNORECASE)
+_DATE_DMY_RE = re.compile(r"\b(\d{2})[-/.](\d{2})[-/.](\d{4})\b")
+
+
+def _parse_license_identity(text: str) -> Optional[Dict[str, Any]]:
+    """Extrae solo identidad básica visible en una licencia colombiana."""
+    if not text or not _LICENSE_MARKER_RE.search(text):
+        return None
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.upper().splitlines()]
+    lines = [line for line in lines if line]
+    number = ""
+    for line in lines:
+        match = _LICENSE_NUMBER_RE.search(line)
+        if match:
+            number = re.sub(r"\D", "", match.group(1))
+            break
+    if not number:
+        return None
+
+    name = ""
+    for idx, line in enumerate(lines):
+        if re.search(r"\bNOMBRE\b", line) and idx + 1 < len(lines):
+            candidate = lines[idx + 1]
+            if len(candidate.split()) >= 2 and not re.search(r"FECHA|SANGRE|EXPED|ORGANISMO", candidate):
+                name = candidate
+                break
+    if not name:
+        for idx, line in enumerate(lines):
+            if number in line and idx + 1 < len(lines):
+                candidate = lines[idx + 1]
+                if len(candidate.split()) >= 2 and re.fullmatch(r"[A-ZÁÉÍÓÚÜÑ ]+", candidate):
+                    name = candidate
+                    break
+
+    birth = ""
+    for idx, line in enumerate(lines):
+        if re.search(r"NACIMIENTO", line):
+            window = " ".join(lines[idx:idx + 3])
+            match = _DATE_DMY_RE.search(window)
+            if match:
+                birth = f"{match.group(3)}-{match.group(2)}-{match.group(1)}"
+                break
+    if not birth:
+        dates = _DATE_DMY_RE.findall(text)
+        if dates:
+            day, month, year = dates[0]
+            birth = f"{year}-{month}-{day}"
+
+    return {
+        "cedula": number,
+        "nombres": name,
+        "primer_apellido": "",
+        "segundo_apellido": "",
+        "fecha_nacimiento": birth,
+        "tipo_documento": "LC",
+        "formato_detectado": "licencia_conduccion",
+        "mrz_valido": False,
+    }
+
 # ─── BUG #1 FIX ──────────────────────────────────────────────────────────────
 # Correcciones OCR: solo para caracteres que visualmente se confunden con dígitos
 _OCR_DIGIT_FIXES = str.maketrans({
@@ -549,10 +609,16 @@ def ocr_cedula(image_bytes: bytes) -> dict:
         best_text = combined
         best_pipeline = "combined_fallback"
 
-    # Intentar enriquecer con parser MRZ/PDF417
-    parsed = parse_mrz_from_text(best_text)
-    if not parsed.get("cedula"):
-        parsed = parse_pdf417(best_text)
+    # Las licencias de conducción no usan MRZ: para el registro solo
+    # necesitamos documento, nombre y fecha de nacimiento.
+    license_parsed = _parse_license_identity(best_text)
+    if license_parsed:
+        parsed = license_parsed
+    else:
+        # Intentar enriquecer con parser MRZ/PDF417
+        parsed = parse_mrz_from_text(best_text)
+        if not parsed.get("cedula"):
+            parsed = parse_pdf417(best_text)
     if parsed.get("cedula"):
         best_cedula = parsed["cedula"]
 
@@ -749,7 +815,10 @@ def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
 
     # Límite de intentos para no degenerar en cientos de llamadas a Tesseract cuando
     # ni la detección por contornos ni las proporciones fijas dan con la banda MRZ.
-    MAX_ATTEMPTS = 60
+    # El MRZ es respaldo: mantenerlo acotado para que una foto no bloquee
+    # la pantalla durante decenas de segundos. Los primeros candidatos son
+    # los recortes y configuraciones que mejor funcionan con ICCOL real.
+    MAX_ATTEMPTS = 24
     attempts = 0
 
     for crop in _mrz_crop_candidates(original):
