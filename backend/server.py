@@ -75,6 +75,7 @@ MONGO_CONNECT_TIMEOUT_MS = int(os.environ.get("MONGO_CONNECT_TIMEOUT_MS", "5000"
 MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+SUPABASE_BACKUP_WAKEUP = asyncio.Event()
 STARTUP_SETUP_MAX_ATTEMPTS = int(os.environ.get("STARTUP_SETUP_MAX_ATTEMPTS", "6"))
 STARTUP_SETUP_RETRY_SECONDS = float(os.environ.get("STARTUP_SETUP_RETRY_SECONDS", "5"))
 
@@ -428,6 +429,9 @@ async def enqueue_supabase_backup(entity_type: str, entity_id: str, payload: Dic
             }, "$setOnInsert": {"attempts": 0}},
             upsert=True,
         )
+        # Wake the background sender now instead of waiting for its polling
+        # interval. The actual network request stays off the scan request path.
+        SUPABASE_BACKUP_WAKEUP.set()
     except Exception:
         logger.exception("No se pudo guardar el respaldo pendiente de %s", backup_id)
 
@@ -484,11 +488,15 @@ async def _supabase_backup_worker() -> None:
         logger.info("Respaldo Supabase no configurado; la API principal sigue operativa.")
         return
     while True:
+        SUPABASE_BACKUP_WAKEUP.clear()
         try:
             await flush_supabase_backup_batch()
         except Exception:
             logger.exception("Error inesperado en el respaldo Supabase")
-        await asyncio.sleep(15)
+        try:
+            await asyncio.wait_for(SUPABASE_BACKUP_WAKEUP.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            pass
 
 
 # ---------- Afiliados seed ----------
