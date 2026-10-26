@@ -21,6 +21,7 @@ import shutil
 import platform
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -529,10 +530,10 @@ def _run_tesseract(img: "Image.Image", config: str, mode: str) -> str:
     """
     lang = _get_tess_lang(mode)
     try:
-        return pytesseract.image_to_string(img, lang=lang, config=config) or ""
+        return pytesseract.image_to_string(img, lang=lang, config=config, timeout=1.5) or ""
     except Exception:
         try:
-            return pytesseract.image_to_string(img, lang="eng", config=config) or ""
+            return pytesseract.image_to_string(img, lang="eng", config=config, timeout=1.5) or ""
         except Exception:
             return ""
 
@@ -579,13 +580,18 @@ def ocr_cedula(image_bytes: bytes) -> dict:
     best_pipeline = ""
     best_config = ""
 
+    deadline = time.monotonic() + 5.0
     for pipe_fn in _PREPROCESS_PIPELINES:
+        if time.monotonic() >= deadline:
+            break
         try:
             proc_img = pipe_fn(original)
         except Exception:
             continue
 
         for config, mode in _TESS_CONFIGS:
+            if time.monotonic() >= deadline:
+                break
             text = _run_tesseract(proc_img, config, mode)
             if text:
                 all_texts.append(text)
@@ -779,7 +785,7 @@ def _preprocess_mrz(img: "Image.Image") -> List["Image.Image"]:
 
 def _run_mrz_tesseract(img: "Image.Image", config: str) -> str:
     try:
-        return pytesseract.image_to_string(img, lang="eng", config=config) or ""
+        return pytesseract.image_to_string(img, lang="eng", config=config, timeout=1.5) or ""
     except Exception:
         return ""
 
@@ -807,10 +813,7 @@ def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
         }
 
     all_texts: List[str] = []
-    # Guardamos el mejor candidato SIN checksum válido como red de seguridad:
-    # si ningún intento pasa el checksum MRZ, preferimos devolver algo (comportamiento
-    # actual) antes que fallar del todo. Pero ya no devolvemos el primer match a ciegas:
-    # cualquier resultado con mrz_valido=True gana de inmediato sobre uno sin validar.
+    # Candidates without valid checks are returned only for explicit operator review.
     best_unvalidated: Optional[Dict[str, Any]] = None
 
     # Límite de intentos para no degenerar en cientos de llamadas a Tesseract cuando
@@ -818,13 +821,14 @@ def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
     # El MRZ es respaldo: mantenerlo acotado para que una foto no bloquee
     # la pantalla durante decenas de segundos. Los primeros candidatos son
     # los recortes y configuraciones que mejor funcionan con ICCOL real.
-    MAX_ATTEMPTS = 24
+    MAX_ATTEMPTS = 6
+    deadline = time.monotonic() + 5.0
     attempts = 0
 
     for crop in _mrz_crop_candidates(original):
         for proc_img in _preprocess_mrz(crop):
             for config in _MRZ_TESS_CONFIGS:
-                if attempts >= MAX_ATTEMPTS:
+                if attempts >= MAX_ATTEMPTS or time.monotonic() >= deadline:
                     break
                 attempts += 1
                 text = _run_mrz_tesseract(proc_img, config)
@@ -847,19 +851,20 @@ def ocr_mrz_cedula(image_bytes: bytes) -> Dict[str, Any]:
                     return candidate
                 if best_unvalidated is None:
                     best_unvalidated = candidate
-            if attempts >= MAX_ATTEMPTS:
+            if attempts >= MAX_ATTEMPTS or time.monotonic() >= deadline:
                 break
-        if attempts >= MAX_ATTEMPTS:
+        if attempts >= MAX_ATTEMPTS or time.monotonic() >= deadline:
             break
 
     if best_unvalidated is not None:
-        return best_unvalidated
+        return {**best_unvalidated, "ok": False, "requires_review": True, "error": "MRZ candidata sin controles válidos; requiere revisión"}
 
     combined = "\n".join(all_texts)
     parsed = parse_mrz_from_text(combined)
     if parsed.get("cedula"):
         return {
-            "ok": True,
+            "ok": bool(parsed.get("mrz_valido")),
+            "requires_review": not bool(parsed.get("mrz_valido")),
             "cedula": parsed.get("cedula") or "",
             "texto_completo": combined,
             "parsed": parsed,
@@ -938,43 +943,20 @@ def _best_identity_number(local: dict, gemini: dict, prefer_gemini: bool) -> str
 
 
 def _merge_ocr_gemini(local_result: dict, gemini_result: dict, prefer_gemini: bool) -> dict:
-    local = local_result or {}
-    gemini = gemini_result or {}
-    local_parsed = local.get("parsed") or {}
-    gemini_parsed = gemini.get("parsed") or {}
-    merged_parsed = dict(gemini_parsed if prefer_gemini else local_parsed)
-    supplemental = local_parsed if prefer_gemini else gemini_parsed
-    for key, value in supplemental.items():
-        if value and not merged_parsed.get(key):
-            merged_parsed[key] = value
-
-    primary = gemini if prefer_gemini else local
-    secondary = local if prefer_gemini else gemini
-    cedula = _best_identity_number(local, gemini, prefer_gemini)
-    if cedula:
-        merged_parsed["cedula"] = cedula
-    pipeline = (
-        "gemini_vision+ocr_local"
-        if prefer_gemini and local
-        else "gemini_vision"
-        if prefer_gemini
-        else f"{local.get('pipeline_usado') or 'ocr_local'}+gemini"
-    )
-
-    if prefer_gemini:
-        texto_completo = gemini.get("texto_completo") or local.get("texto_completo") or ""
-    else:
-        texto_completo = local.get("texto_completo") or gemini.get("texto_completo") or ""
-
-    return {
-        **local,
-        "ok": True,
-        "cedula": cedula,
-        "texto_completo": texto_completo,
-        "pipeline_usado": pipeline,
-        "parsed": merged_parsed,
-        "gemini": gemini.get("gemini") or {},
-    }
+    # Identity fields stay together. Cloud values never inherit a local MRZ-valid flag.
+    local, cloud = local_result or {}, gemini_result or {}
+    local_doc = _clean_doc_number(local.get("cedula") or (local.get("parsed") or {}).get("cedula"))
+    cloud_doc = _clean_doc_number(cloud.get("cedula") or (cloud.get("parsed") or {}).get("cedula"))
+    if local.get("mrz_valido") or (local.get("parsed") or {}).get("mrz_valido"):
+        return local
+    if local_doc and cloud_doc and local_doc != cloud_doc:
+        return {"ok": False, "cedula": "", "parsed": {}, "requires_review": True,
+                "mrz_valido": False, "error": "identidades_distintas_ocr_gemini"}
+    chosen = cloud if cloud_doc and (prefer_gemini or not local_doc) else local
+    if not chosen:
+        return {"ok": False, "cedula": "", "parsed": {}, "requires_review": True, "mrz_valido": False}
+    parsed = {**(chosen.get("parsed") or {}), "mrz_valido": False}
+    return {**chosen, "parsed": parsed, "mrz_valido": False, "raw_mrz": [], "requires_review": True}
 
 
 def _merge_local_ocr_mrz(local_result: dict, mrz_result: dict) -> dict:
@@ -983,9 +965,11 @@ def _merge_local_ocr_mrz(local_result: dict, mrz_result: dict) -> dict:
     if not mrz.get("cedula"):
         return local
 
+    if not mrz.get("mrz_valido"):
+        return {**mrz, "ok": False, "requires_review": True, "pipeline_usado": "mrz_review"}
     local_parsed = local.get("parsed") or {}
     mrz_parsed = mrz.get("parsed") or {}
-    merged_parsed = dict(local_parsed)
+    merged_parsed = dict(mrz_parsed)
     for key, value in mrz_parsed.items():
         if value and (not merged_parsed.get(key) or key in {"cedula", "primer_apellido", "segundo_apellido", "nombres", "fecha_nacimiento", "fecha_expiracion", "genero"}):
             merged_parsed[key] = value
@@ -1002,9 +986,10 @@ def _merge_local_ocr_mrz(local_result: dict, mrz_result: dict) -> dict:
 
     return {
         **local,
-        "ok": True,
+        "ok": bool(mrz.get("mrz_valido")),
+        "requires_review": not bool(mrz.get("mrz_valido")),
         "cedula": cedula,
-        "texto_completo": local.get("texto_completo") or mrz.get("texto_completo") or "",
+        "texto_completo": mrz.get("texto_completo") or local.get("texto_completo") or "",
         "pipeline_usado": pipeline,
         "parsed": merged_parsed,
         "raw_mrz": mrz.get("raw_mrz") or local.get("raw_mrz") or [],
@@ -1025,7 +1010,7 @@ async def _analyze_gemini_async(img_bytes: bytes) -> dict:
     return await loop.run_in_executor(None, analyze_cedula_with_gemini, img_bytes)
 
 
-async def ocr_from_base64_async(data_uri_or_b64: str, force_gemini: bool = False) -> dict:
+async def ocr_from_base64_async(data_uri_or_b64: str, force_gemini: bool = False, allow_gemini: bool = False) -> dict:
     """
     Versión async-safe de ocr_from_base64.
     Úsala en endpoints FastAPI async para no bloquear el event loop.
@@ -1044,6 +1029,9 @@ async def ocr_from_base64_async(data_uri_or_b64: str, force_gemini: bool = False
         img_bytes = base64.b64decode(s + "==", validate=False)
     except Exception as e:
         return {"ok": False, "error": f"Base64 inválido: {e}", "cedula": "", "texto_completo": ""}
+
+    if not allow_gemini and not force_gemini:
+        return await _ocr_cedula_with_mrz_async(img_bytes)
 
     gemini_available = bool(should_use_gemini and analyze_cedula_with_gemini and should_use_gemini({"cedula": ""}))
     gemini_first = bool(gemini_should_run_first and gemini_should_run_first())

@@ -32,13 +32,15 @@ import secrets
 import unicodedata
 import uuid
 import csv as csv_lib
+import base64
 import jwt
 import requests
 
+from mrz_validation import validate_mrz, is_mrz_text
 from cedula_parser import clean_cedula, extract_cedula, parse_pdf417
 from ocr_service import ocr_from_base64_async, ocr_dependency_status
 from barcode_service import decode_identity_document_from_base64, barcode_dependency_status
-from gemini_service import gemini_dependency_status
+from gemini_service import gemini_dependency_status, analyze_cedula_with_gemini
 
 # ---------- Config & init ----------
 ROOT_DIR = Path(__file__).parent
@@ -154,6 +156,7 @@ class EscanearRequest(BaseModel):
     municipio: Optional[str] = ""
     cargo: Optional[str] = ""
     raw_barcode: Optional[str] = ""
+    capture_source: str = Field(default="", max_length=40)
     primer_apellido: Optional[str] = ""
     segundo_apellido: Optional[str] = ""
     nombres: Optional[str] = ""
@@ -655,7 +658,7 @@ async def lifespan(app: FastAPI):
 
 
 # ---------- App ----------
-app = FastAPI(title="CedulaScan Pro API", version="2.2.0", lifespan=lifespan)
+app = FastAPI(title="CedulaScan Pro API", version="2.3.0", lifespan=lifespan)
 api = APIRouter(prefix="/api")
 
 app.add_middleware(
@@ -1671,6 +1674,19 @@ async def escanear(
     if not cedula_norm:
         raise HTTPException(status_code=400, detail="Cédula inválida")
 
+    # Automatic MRZ must pass server validation before any side effects.
+    if body.capture_source.startswith("mrz") or is_mrz_text(body.raw_barcode):
+        validation = validate_mrz(body.raw_barcode)
+        if not validation["valid"] or validation.get("cedula") != cedula_norm:
+            raise HTTPException(status_code=422, detail="MRZ sin controles válidos o identificación diferente")
+        body.nombres = validation["names"]
+        body.primer_apellido = validation["surname"][0]
+        body.segundo_apellido = " ".join(validation["surname"][1:])
+        body.fecha_nacimiento = validation["birth"]
+        body.fecha_expiracion = validation["expiry"]
+        body.genero = validation["gender"] if validation["gender"] in ("M", "F") else ""
+        body.nombre = " ".join(filter(None, [body.nombres, body.primer_apellido, body.segundo_apellido]))
+
     evento = await db.eventos.find_one(
         {"id": body.evento_id},
         {"_id": 0, "id": 1, "activo": 1},
@@ -1785,6 +1801,7 @@ async def escanear(
         "operator_email": current["email"],
         "operator_id":    current["id"],
         "timestamp":    body.timestamp or ts_ms,
+        "capture_source": body.capture_source,
         "nonce":        body.nonce,
         "dedup_hash":   dedup_hash,
         "created_at":   now_iso(),
@@ -1866,7 +1883,8 @@ async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
     if result.get("cedula"):
         afiliado = await db.afiliados.find_one({"cedula": result["cedula"]}, {"_id": 0})
     return {
-        "ok":      bool(result.get("cedula")),
+        "ok":      bool(result.get("cedula")) and bool(parsed.get("mrz_valido")),
+        "requires_review": not bool(parsed.get("mrz_valido")),
         "cedula":  result.get("cedula") or "",
         "texto":   (result.get("texto_completo") or "")[:300],
         "texto_completo": result.get("texto_completo") or "",
@@ -1880,6 +1898,31 @@ async def api_ocr_cedula(body: OcrRequest, current=Depends(get_current_user)):
     }
 
 
+@api.post("/ocr/cedula/local")
+async def api_ocr_cedula_local(body: OcrRequest, current=Depends(get_current_user)):
+    # Separate route prevents an older cloud-first deployment from serving this flow.
+    body.force_gemini = False
+    return await api_ocr_cedula(body, current)
+
+
+class GeminiBackupRequest(BaseModel):
+    image_base64: str = Field(min_length=10, max_length=11_000_000)
+
+
+@api.post("/ocr/cedula/gemini-backup")
+async def api_gemini_backup(body: GeminiBackupRequest, current=Depends(get_current_user)):
+    # Called only after the operator explicitly selects the cloud backup.
+    value = re.sub(r"^data:image/[a-zA-Z0-9.+-]+;base64,", "", body.image_base64)
+    try:
+        image = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Imagen Base64 inválida")
+    result = await asyncio.get_running_loop().run_in_executor(None, analyze_cedula_with_gemini, image)
+    # Never forwards cloud confidence as an automatic registration decision.
+    return {**result, "parsed": {**(result.get("parsed") or {}), "mrz_valido": False},
+            "requires_review": True, "mrz_valido": False}
+
+
 @api.post("/barcode/cedula")
 async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)):
     loop = asyncio.get_event_loop()
@@ -1888,7 +1931,8 @@ async def api_barcode_cedula(body: OcrRequest, current=Depends(get_current_user)
     if result.get("cedula"):
         afiliado = await db.afiliados.find_one({"cedula": result["cedula"]}, {"_id": 0})
     return {
-        "ok": bool(result.get("cedula")),
+        "ok": bool(result.get("ok")),
+        "requires_review": bool(result.get("requires_review")),
         "cedula": result.get("cedula") or "",
         "raw": result.get("raw") or "",
         "parsed": result.get("parsed") or {},
@@ -1915,8 +1959,22 @@ async def health():
         "service": "CedulaScan Pro",
         "status": "live",
         "version": app.version,
+        "scanner_release": "1.0.9",
+        "commit": os.environ.get("RENDER_GIT_COMMIT", ""),
         "database_ready": startup_state["database_ready"],
     }
+
+
+@api.get("/ready")
+async def ready():
+    """Deployment gate: never route traffic to an instance without a ready database."""
+    if not startup_state["database_ready"]:
+        raise HTTPException(status_code=503, detail="Preparando base de datos")
+    try:
+        await db.command("ping")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Base de datos no disponible")
+    return {"ok": True, "version": app.version, "scanner_release": "1.0.9"}
 
 
 async def mongo_dependency_status() -> Dict[str, Any]:
@@ -1984,6 +2042,8 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
         if not raw_text:
             raise HTTPException(status_code=400, detail="El texto de barras enviado está vacío")
             
+        if is_mrz_text(raw_text) and not validate_mrz(raw_text)["valid"]:
+            raise HTTPException(status_code=422, detail="MRZ sin controles válidos")
         try:
             parsed = parse_pdf417(raw_text)
             cedula = parsed.get("cedula") or extract_cedula(raw_text) or ""
@@ -2023,6 +2083,8 @@ async def ocr_cedula(payload: dict, current=Depends(get_current_user)):
                     "error": resultado_img.get("error") or ocr_result.get("error") or "No se detectó el código PDF417",
                 }
 
+        if not resultado_img.get("mrz_valido"):
+            return {"ok": False, "requires_review": True, "error": "Lectura de imagen pendiente de revisión", "parsed": resultado_img.get("parsed", {})}
         cedula = resultado_img.get("cedula")
         raw_text = resultado_img.get("raw", "")
         parsed = resultado_img.get("parsed", {})

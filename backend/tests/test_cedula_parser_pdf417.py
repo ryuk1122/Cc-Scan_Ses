@@ -57,7 +57,8 @@ def _mrz_td1(doc: str = "123456789") -> str:
     expiry = "300101"
     l1 = f"IDCOL{doc}{mrz_check_digit(doc)}".ljust(30, "<")
     l2_body = f"{birth}{mrz_check_digit(birth)}F{expiry}{mrz_check_digit(expiry)}COL"
-    l2 = l2_body.ljust(29, "<") + "0"
+    middle = l2_body.ljust(29, "<")
+    l2 = middle + str(mrz_check_digit(l1[5:] + middle[:7] + middle[8:15] + middle[18:29]))
     l3 = "VALENCIA<BENITEZ<<DAYFENIX".ljust(30, "<")
     return "\n".join([l1, l2, l3])
 
@@ -99,7 +100,7 @@ def test_parse_new_colombian_iccol_mrz_uses_nuip_line2():
     assert parsed["fecha_nacimiento"] == "2004-03-15"
     assert parsed["fecha_expiracion"] == "2032-03-19"
     assert parsed["nacionalidad"] == "COL"
-    assert parsed["mrz_valido"] is True
+    assert parsed["mrz_valido"] is False  # Incomplete OCR remains a candidate.
 
 
 def test_parse_new_colombian_iccol_mrz_from_photo_example_prefers_line2_nuip():
@@ -129,7 +130,8 @@ def test_parse_new_colombian_iccol_mrz_cleans_ocr_filler_before_given_name():
 
     assert parsed["cedula"] == "1234567890"
     assert parsed["primer_apellido"] == "WALTEROS"
-    assert parsed["nombres"] == "LAURA"
+    assert parsed["nombres"] == "TSSSISSLKLAURA"  # Candidate text must not lose letters.
+    assert parsed["mrz_valido"] is False
     assert parsed["fecha_nacimiento"] == "1988-08-21"
 
 
@@ -144,7 +146,8 @@ def test_parse_new_colombian_iccol_mrz_cleans_cf_ocr_filler_before_given_name():
 
     assert parsed["cedula"] == "1234567890"
     assert parsed["primer_apellido"] == "WALTEROS"
-    assert parsed["nombres"] == "LAURA"
+    assert parsed["nombres"] == "FSCCCCCCCLAURA"  # Candidate text must not lose letters.
+    assert parsed["mrz_valido"] is False
 
 
 def test_extract_cedula_does_not_use_iccol_internal_serial():
@@ -190,6 +193,6 @@ def test_parse_iccol_mrz_cleans_trailing_ocr_filler_from_names():
     parsed = parse_mrz_from_text(raw)
 
     assert parsed["cedula"] == "1234567890"
-    assert parsed["nombres"] == "LAURA"
+    assert parsed["nombres"] == "LAURA KKK K"  # Preserve observed tokens; require review.
     assert parsed["primer_apellido"] == "WALTEROS"
-    assert parsed["mrz_valido"] is True
+    assert parsed["mrz_valido"] is False
