@@ -1,0 +1,2 @@
+ba869461641a4688cc5b893e2f297e5ac15ecdcf5904e49a085667f8f796d9b5  CedulaScan-Pro-1.0.9-lectura-rapida.apk
+b6c53e49a5f377820572d497eecdc1a6e5cd525be04f0a84c31a4044a1c84d44  CedulaScan-Pro-1.0.9-kit.zip
