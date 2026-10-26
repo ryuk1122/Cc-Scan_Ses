@@ -136,9 +136,14 @@ export const api = {
     }, true, 5000),
 
   // OCR del frente
-  ocrCedula: (imageBase64: string, options: { forceGemini?: boolean } = {}) =>
+  geminiBackup: (imageBase64: string) =>
+    request<{ ok: boolean; cedula: string; parsed?: any; requires_review: boolean; error?: string }>(
+      "/ocr/cedula/gemini-backup",
+      { method: "POST", body: JSON.stringify({ image_base64: imageBase64 }) }, true, 22000,
+    ),
+  ocrCedula: (imageBase64: string, options: { forceGemini?: boolean; localOnly?: boolean } = {}) =>
     request<{ ok: boolean; cedula: string; texto_completo?: string; pipeline_usado?: string; gemini?: any; afiliado: any; parsed?: any; raw_mrz?: string[]; mrz_valido?: boolean; error?: string }>(
-      "/ocr/cedula",
+      options.localOnly ? "/ocr/cedula/local" : "/ocr/cedula",
       { method: "POST", body: JSON.stringify({ image_base64: imageBase64, force_gemini: !!options.forceGemini }) },
       true,
       22000,

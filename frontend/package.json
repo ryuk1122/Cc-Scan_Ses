@@ -9,6 +9,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
+    "test:mrz": "node scripts/test-mrz.cjs",
     "postinstall": "patch-package"
   },
   "dependencies": {

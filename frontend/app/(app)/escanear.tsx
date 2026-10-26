@@ -25,7 +25,8 @@ import { useSession } from "@/src/ctx/session";
 import { useEvento } from "@/src/ctx/evento";
 import { api } from "@/src/utils/api";
 import { extractCedula, parsePdf417 } from "@/src/utils/cedula";
-import { analizarConGemini } from "@/src/services/geminiService";
+import { LocalCedulaCamera, localScannerAvailable } from "@/src/components/LocalCedulaCamera";
+import { validateMrz, isMrzText } from "@/src/utils/mrzValidation";
 
 const PILL_TIMEOUT = 2500;
 const RAW_SCAN_COOLDOWN_MS = 900;
@@ -74,7 +75,7 @@ type ServerParsedCedula = Partial<Pick<
   | "tipo_sangre"
   | "mrz_valido"
 >>;
-type OcrReadResult = { raw: string; serverParsed?: ServerParsedCedula };
+type OcrReadResult = { raw: string; serverParsed?: ServerParsedCedula; error?: string };
 type PrintPayload = { nombre: string; cargo: string; municipio: string; sede?: string };
 type ScanFeedback = { kind: "ok" | "dup" | "err"; title: string; detail: string; cedula?: string; municipio?: string };
 
@@ -212,6 +213,8 @@ function isReliableBarcode(raw: string, currentMode: Mode): boolean {
   const value = String(raw || "").trim();
   if (!value) return false;
   if (currentMode === "manual") return true;
+  if (value.includes("PubDSK_") || (value.includes("\u0000") && value.length >= 120)) return true;
+  if (isMrzText(value)) return validateMrz(value).valid;
   if (extractQrCedulaPayload(value)) return true;
   if (/^\d{5,11}$/.test(value)) return true;
   if (/registraduria\.gov\.co/i.test(value)) return true;
@@ -292,8 +295,8 @@ export default function EscanearScreen() {
   const [preview, setPreview] = useState<AfiliadoPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
   const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
-  const [iaLoading, setIaLoading] = useState(false);
   const [scannerEnabled, setScannerEnabled] = useState(true);
 
   const [permission, requestPermission] = useCameraPermissions();
@@ -303,13 +306,18 @@ export default function EscanearScreen() {
   const lastScanRef = useRef<{ value: string; at: number } | null>(null);
   const lastRawScanRef = useRef<{ value: string; at: number } | null>(null);
   const scanBusyRef = useRef(false);
-  const iaLoadingRef = useRef(false);
   const ocrLoadingRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scannerRearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashAnim = useMemo(() => new Animated.Value(0), []);
   const scanLineAnim = useMemo(() => new Animated.Value(0), []);
   const cameraRef = useRef<any>(null);
+  const photoSession = useRef({ id: 0 });
+  useEffect(() => {
+    const session = photoSession.current;
+    session.id++;
+    return () => { session.id++; };
+  }, [mode, isFocused, eventoId]);
   const [reticleHeight, setReticleHeight] = useState(0);
 
   useFocusEffect(useCallback(() => {
@@ -398,6 +406,7 @@ export default function EscanearScreen() {
 
   const captureCameraBase64 = useCallback(async (quality: number, skipProcessing = true): Promise<string> => {
     if (!cameraRef.current) return "";
+    if (typeof cameraRef.current.capture === "function") return cameraRef.current.capture();
     if (typeof cameraRef.current.takePhoto === "function") {
       const photo = await cameraRef.current.takePhoto({ flash: "off" });
       const path = photo?.path ? String(photo.path) : "";
@@ -414,23 +423,6 @@ export default function EscanearScreen() {
     return photo?.base64 || "";
   }, []);
 
-  const readCameraWithGemini = useCallback(async (imageBase64?: string): Promise<ServerParsedCedula | null> => {
-    if ((!imageBase64 && !cameraRef.current) || iaLoadingRef.current) return null;
-    iaLoadingRef.current = true;
-    setIaLoading(true);
-    try {
-      const b64 = imageBase64 || await captureCameraBase64(0.78, false);
-      if (!b64) return null;
-      const iaResult = await analizarConGemini(b64);
-      return iaResult?.cedula ? iaResult : null;
-    } catch {
-      return null;
-    } finally {
-      iaLoadingRef.current = false;
-      setIaLoading(false);
-    }
-  }, [captureCameraBase64]);
-
   const readCameraWithOcr = useCallback(async (imageBase64?: string): Promise<OcrReadResult> => {
     if ((!imageBase64 && !cameraRef.current) || ocrLoadingRef.current) return { raw: "" };
     ocrLoadingRef.current = true;
@@ -438,15 +430,15 @@ export default function EscanearScreen() {
     try {
       const b64 = imageBase64 || await captureCameraBase64(0.72, false);
       if (!b64) return { raw: "" };
-      const res = await api.ocrCedula(b64);
-      if (res.ok && res.cedula) {
+      const res = await api.ocrCedula(b64, { localOnly: true });
+      if (res.cedula) {
         const raw = res.raw_mrz?.length ? res.raw_mrz.join("\n") : (res.texto_completo || res.cedula);
         const serverParsed = { ...res.parsed, cedula: res.cedula, mrz_valido: res.mrz_valido ?? res.parsed?.mrz_valido };
         return { raw, serverParsed };
       }
       return { raw: "" };
     } catch {
-      return { raw: "" };
+      return { raw: "", error: "No se pudo contactar el respaldo local. Verifica conexión y servidor." };
     } finally {
       ocrLoadingRef.current = false;
       setOcrLoading(false);
@@ -454,15 +446,22 @@ export default function EscanearScreen() {
   }, [captureCameraBase64]);
 
   const handleScan = useCallback(
-    async (raw: string, options: { serverParsed?: ServerParsedCedula } = {}) => {
-      if (scanBusyRef.current) return;
+    async (raw: string, options: { serverParsed?: ServerParsedCedula; reviewed?: boolean; source?: string } = {}): Promise<boolean> => {
+      if (scanBusyRef.current) return false;
       scanBusyRef.current = true;
       setScannerEnabled(false);
       try {
-        let rawToUse = normalizeQrCedulaPayload(raw);
+        const strictMrz = validateMrz(raw);
+        const looksMrz = isMrzText(raw);
+        if (looksMrz && !strictMrz.valid && !options.reviewed) {
+          showToast("err", "MRZ incompleta o sin controles válidos. Mantén la cédula quieta.");
+          return false;
+        }
+        const binaryBarcode = raw.includes("\u0000") || raw.includes("PubDSK_");
+        let rawToUse = strictMrz.valid ? strictMrz.lines.join("\n") : binaryBarcode ? raw : normalizeQrCedulaPayload(raw);
         let inheritedServerParsed = options.serverParsed;
         const hasServerParsed = () => !!inheritedServerParsed && Object.keys(inheritedServerParsed).length > 0;
-        const canUseServerParsed = () => hasServerParsed() && !!cleanCedulaNumber(inheritedServerParsed?.cedula);
+        const canUseServerParsed = () => hasServerParsed() && !!cleanCedulaNumber(inheritedServerParsed?.cedula) && (options.reviewed || strictMrz.valid);
         const buildParsed = (): ParsedCedulaResult => canUseServerParsed()
           ? {
               cedula: inheritedServerParsed?.cedula || "",
@@ -484,7 +483,7 @@ export default function EscanearScreen() {
           showToast("err", mode === "camera"
             ? "Código incompleto. Alinea el documento o toma la foto manualmente para OCR."
             : "No pude confirmar la cédula.");
-          return;
+          return false;
         }
 
         const parsed = buildParsed();
@@ -492,12 +491,12 @@ export default function EscanearScreen() {
         if (!cedula) {
           setScanFeedback({ kind: "err", title: "NO CONFIRMADA", detail: "No se encontró un número de cédula legible." });
           showToast("err", "No pude confirmar la cédula. Usa la camara completa o manual.");
-          return;
+          return false;
         }
         setDocumentPreview(buildDocumentPreview(cedula, parsed, parsed.formato_detectado || "camara"));
         const now = Date.now();
         if (lastScanRef.current && lastScanRef.current.value === cedula && now - lastScanRef.current.at < 1500) {
-          return;
+          return false;
         }
         lastScanRef.current = { value: cedula, at: now };
 
@@ -537,6 +536,7 @@ export default function EscanearScreen() {
           municipio: "",
           sede: "",
           raw_barcode: rawToUse,
+          capture_source: options.source || (strictMrz.valid ? "mrz_local" : options.reviewed ? "ocr_reviewed" : mode === "manual" ? "manual" : "barcode"),
           primer_apellido: parsed.primer_apellido,
           segundo_apellido: parsed.segundo_apellido,
           nombres: parsed.nombres,
@@ -574,6 +574,10 @@ export default function EscanearScreen() {
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           showToast("err", res.mensaje);
         }
+        return !!(res.ok || res.duplicate);
+      } catch {
+        showToast("err", "No se pudo completar el registro. Puedes volver a presentar la cédula.");
+        return false;
       } finally {
         scanBusyRef.current = false;
         if (mode === "camera") rearmScanner();
@@ -582,9 +586,38 @@ export default function EscanearScreen() {
     [mode, scan, showToast, flashDuplicate, buildDocumentPreview, rearmScanner],
   );
 
+  const offerGeminiBackup = useCallback((image: string, ticket: number) => {
+    if (ticket !== photoSession.current.id) return;
+    setReviewPending(true);
+    Alert.alert("Respaldo opcional con Gemini",
+      "La lectura local no fue suficiente. Si eliges continuar, esta foto se enviará a Google y puede consumir cuota o generar un cargo de API. El resultado siempre necesitará tu revisión.",
+      [{ text: "Seguir con lectura local", style: "cancel", onPress: () => setReviewPending(false) },
+       { text: "Usar Gemini con esta foto", onPress: () => {
+         if (ticket !== photoSession.current.id) { setReviewPending(false); return; }
+         setReviewPending(false); setOcrLoading(true); cameraReadBusy.current = true;
+         void api.geminiBackup(image).then(result => {
+           if (ticket !== photoSession.current.id) return;
+           if (!result.ok || !result.cedula) {
+             showToast("err", result.error === "gemini_no_configurado" ? "El respaldo con Gemini no está habilitado." : "El respaldo no pudo confirmar datos legibles. Usa lectura local o entrada manual.");
+             return;
+           }
+           const candidate: ServerParsedCedula = { ...result.parsed, cedula: result.cedula, mrz_valido: false };
+           setReviewPending(true);
+           Alert.alert("Revisar resultado de Gemini", `Compara con el documento antes de registrar:\n\n${candidate.cedula}\n${[candidate.nombres, candidate.primer_apellido, candidate.segundo_apellido].filter(Boolean).join(" ")}\n${candidate.fecha_nacimiento || "Fecha no leída"}`,
+             [{ text: "Descartar", style: "cancel", onPress: () => setReviewPending(false) },
+              { text: "Datos correctos: registrar", onPress: () => {
+                setReviewPending(false);
+                if (ticket === photoSession.current.id) void handleScan(candidate.cedula || "", { serverParsed: candidate, reviewed: true, source: "gemini_reviewed" });
+              }}], { cancelable: false });
+         }).catch(() => { if (ticket === photoSession.current.id) showToast("err", "No se pudo conectar con el respaldo de Gemini."); })
+           .finally(() => { cameraReadBusy.current = false; setOcrLoading(false); });
+       }}], { cancelable: false });
+  }, [handleScan, showToast]);
+
   const captureAndDecodeBarcode = useCallback(async (silent = false) => {
     if (!cameraRef.current || cameraReadBusy.current || scanBusyRef.current) return;
     cameraReadBusy.current = true;
+    const ticket = photoSession.current.id;
     try {
       const imageBase64 = await captureCameraBase64(0.65);
       if (!imageBase64) {
@@ -596,27 +629,28 @@ export default function EscanearScreen() {
       // QR/PDF417 se leen directamente mientras la cámara está abierta.
       // Este botón queda reservado para OCR/MRZ de la foto tomada por el usuario.
       const ocrResult = await readCameraWithOcr(imageBase64);
+      if (ticket !== photoSession.current.id) return;
+      if (ocrResult.error) { showToast("err", ocrResult.error); return; }
       if (ocrResult.raw && ocrResult.serverParsed?.cedula) {
-        await handleScan(ocrResult.raw, {
-          serverParsed: ocrResult.serverParsed,
-        });
-        return;
-      }
-
-      const geminiResult = await readCameraWithGemini(imageBase64);
-      if (geminiResult?.cedula) {
-        await handleScan(geminiResult.cedula, { serverParsed: geminiResult });
+        const validation = validateMrz(ocrResult.raw);
+        if (validation.valid && ocrResult.serverParsed.mrz_valido) await handleScan(validation.lines.join("\n"), { source: "mrz_photo" });
+        else {
+          const candidate = ocrResult.serverParsed;
+          setReviewPending(true);
+          Alert.alert("Revisar lectura", `Compara estos datos con la cédula antes de registrar:\n\n${candidate.cedula}\n${[candidate.nombres, candidate.primer_apellido, candidate.segundo_apellido].filter(Boolean).join(" ")}\n${candidate.fecha_nacimiento || "Fecha no leída"}`,
+            [{ text: "Cancelar", style: "cancel", onPress: () => setReviewPending(false) }, { text: "Releer con Gemini", onPress: () => offerGeminiBackup(imageBase64, ticket) }, { text: "Datos correctos: registrar", onPress: () => { setReviewPending(false); if (ticket === photoSession.current.id) void handleScan(candidate.cedula || "", { serverParsed: candidate, reviewed: true, source: "ocr_reviewed" }); } }], { cancelable: false });
+        }
         return;
       }
 
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      if (!silent) showToast("err", "No pude leer la MRZ. Alinea las tres líneas, evita reflejos y acerca la licencia.");
+      if (!silent) offerGeminiBackup(imageBase64, ticket);
     } catch {
-      if (!silent) showToast("err", "No pude validar la MRZ. Alinea la licencia frente a la cámara.");
+      if (!silent) showToast("err", "No pude validar la MRZ. Alinea la cédula frente a la cámara.");
     } finally {
       cameraReadBusy.current = false;
     }
-  }, [captureCameraBase64, handleScan, readCameraWithOcr, readCameraWithGemini, showToast]);
+  }, [captureCameraBase64, handleScan, readCameraWithOcr, offerGeminiBackup, showToast]);
 
   // Auto-lookup as user types in manual mode (debounced)
   useEffect(() => {
@@ -750,6 +784,39 @@ export default function EscanearScreen() {
                 <Text style={styles.primaryBtnText}>Otorgar permiso</Text>
               </TouchableOpacity>
             </View>
+          ) : localScannerAvailable ? (
+            <LocalCedulaCamera ref={cameraRef} style={ABSOLUTE_FILL}
+              active={scannerEnabled && !ocrLoading && !reviewPending}
+              onMrz={(raw) => scanBusyRef.current || cameraReadBusy.current ? Promise.resolve(false) : handleScan(raw, { source: "mrz_local" })}
+              onBarcode={(raw, type) => {
+                if (scanBusyRef.current || cameraReadBusy.current) return false;
+                const now = Date.now();
+                if (lastRawScanRef.current?.value === raw && now-lastRawScanRef.current.at < RAW_SCAN_COOLDOWN_MS) return false;
+                lastRawScanRef.current = { value: raw, at: now };
+                if (type === "qr" && !extractCedulaFromCameraPayload(raw)) {
+                  showToast("err", "QR sin identidad legible. Presenta las tres líneas MRZ.");
+                  return false;
+                }
+                void handleScan(raw, { source: "barcode" });
+                return true;
+              }}>
+              <View style={styles.reticleOverlay} pointerEvents="none">
+                <View style={[styles.reticle, styles.backReticle]}>
+                  <View style={[styles.reticleCorner, styles.reticleCornerTopLeft]} />
+                  <View style={[styles.reticleCorner, styles.reticleCornerTopRight]} />
+                  <View style={[styles.reticleCorner, styles.reticleCornerBottomLeft]} />
+                  <View style={[styles.reticleCorner, styles.reticleCornerBottomRight]} />
+                  <View style={styles.mrzGuide}><View style={styles.mrzGuideLine} /><View style={styles.mrzGuideLine} /><View style={styles.mrzGuideLine} /></View>
+                </View>
+                <Text style={styles.reticleHint}>Lectura automática en el teléfono · MRZ y PDF417</Text>
+              </View>
+              <View style={styles.captureBar}>
+                <TouchableOpacity style={styles.captureBtn} disabled={ocrLoading || reviewPending}
+                  onPress={() => { void captureAndDecodeBarcode(false); }}>
+                  {ocrLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.captureBtnText}>Foto de respaldo y revisión</Text>}
+                </TouchableOpacity>
+              </View>
+            </LocalCedulaCamera>
           ) : (
             <CameraView
   ref={cameraRef}
@@ -759,7 +826,7 @@ export default function EscanearScreen() {
   barcodeScannerSettings={{
     barcodeTypes: ["pdf417", "qr"],
   }}
-  onBarcodeScanned={scannerEnabled ? ({ raw, data, type }) => {
+  onBarcodeScanned={scannerEnabled && !reviewPending ? ({ raw, data, type }) => {
     const payload = scannedPayload(raw, data);
     if (!payload) return;
     const normalized = normalizeQrCedulaPayload(payload);
@@ -808,11 +875,11 @@ export default function EscanearScreen() {
               <View style={styles.captureBar}>
                 <TouchableOpacity
                   testID="decode-pdf417-photo-btn"
-                  style={[styles.captureBtn, (ocrLoading || iaLoading) && { opacity: 0.6 }]}
+                  style={[styles.captureBtn, (ocrLoading) && { opacity: 0.6 }]}
                   onPress={() => { void captureAndDecodeBarcode(false); }}
-                  disabled={ocrLoading || iaLoading}
+                  disabled={ocrLoading || reviewPending}
                 >
-                  {ocrLoading || iaLoading ? (
+                  {ocrLoading ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
                     <>

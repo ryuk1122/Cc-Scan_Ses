@@ -1,3 +1,4 @@
+import { validateMrz } from './mrzValidation';
 /**
  * Colombian ID parser for camera barcodes, QR/MRZ text, OCR text and manual input.
  */
@@ -105,39 +106,8 @@ function cleanTextField(value: string): string {
   return text.length >= 2 ? text : "";
 }
 
-function scoreMrzNameSuffix(value: string): number {
-  const text = String(value || "").toUpperCase().replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "");
-  if (text.length < 2) return -99;
-  const vowels = (text.match(/[AEIOUÁÉÍÓÚÜ]/g) || []).length;
-  let score = vowels * 3 + Math.min(text.length, 12) * 0.2;
-  if (/^[BCDFGHJKLMNPQRSTVWXYZ][AEIOUÁÉÍÓÚÜ]/.test(text)) score += 0.6;
-  if (/^[BCDFGHJKLMNPQRSTVWXYZ]{3,}/.test(text)) score -= 6;
-  const leadingFiller = text.match(/^[TSILKCF]+/);
-  if (leadingFiller && text.length > 8) score -= leadingFiller[0].length * 2;
-  if (/(SS|II|LL|TT|KK|CC|FF)/.test(text.slice(0, 6))) score -= 3;
-  if (/(.)\1{2,}/.test(text)) score -= 4;
-  return score;
-}
-
 function cleanMrzNameToken(value: string): string {
-  const text = String(value || "").toUpperCase().replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "");
-  if (text.length <= 8) return text;
-  const prefix = text.slice(0, 10);
-  if (!/^[TSILKCF]{4,}/.test(prefix) && !/([TSILKCF])\1{2,}/.test(prefix)) return text;
-
-  let best = text;
-  let bestScore = scoreMrzNameSuffix(text);
-  for (let i = 3; i < text.length - 1; i += 1) {
-    const junk = text.slice(0, i);
-    const suffix = text.slice(i);
-    if (suffix.length < 2 || !/^[TSILKCF]+$/.test(junk)) continue;
-    const score = scoreMrzNameSuffix(suffix) + Math.min(i, 10) * 0.35;
-    if (score > bestScore + 0.3) {
-      best = suffix;
-      bestScore = score;
-    }
-  }
-  return best;
+  return String(value || "").toUpperCase().replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "");
 }
 
 function rawToBytes(raw: string): number[] {
@@ -349,40 +319,35 @@ function stripIccolInternalNumber(raw: string): string {
 export function parseMrz(raw: string | null | undefined): ParsedCedula {
   const out = emptyParsed(raw);
   if (!raw) return out;
-  const lines = candidateMrzLines(raw);
+  const validation = validateMrz(raw);
+  const lines = validation.valid ? validation.lines : candidateMrzLines(raw);
   if (lines.length < 3 || (!lines[0].startsWith("IDCOL") && !lines[0].startsWith("ICCOL"))) return out;
 
   const [l1, l2, l3] = lines;
   const l1Numeric = `${l1.slice(0, 5)}${fixMrzDigits(l1.slice(5))}`;
   const docFieldRaw = fixMrzDigits(l1.slice(5, 14));
-  const docCheckRaw = fixMrzDigits(l1[14]).slice(0, 1);
   const extraChar = fixMrzDigits(l1.slice(15, 16));
   let docField = docFieldRaw;
-  let docCheck = docCheckRaw;
   const docMatch = l1Numeric.match(/^(?:IDCOL|ICCOL)(\d{5,9})([0-9])/);
   if (docMatch) {
     const candidate = docMatch[1];
     const possibleCheck = docMatch[2];
     if (validateMrzField(candidate.replace(/^0+/, "") || candidate, possibleCheck)) {
       docField = candidate;
-      docCheck = possibleCheck;
     } else if (/^\d$/.test(extraChar)) {
       const candidate10 = candidate + possibleCheck;
       if (validateMrzField(candidate10, extraChar)) {
         docField = candidate10;
-        docCheck = extraChar;
       }
     }
   }
   const birth = fixMrzDigits(l2.slice(0, 6));
-  const birthCheck = fixMrzDigits(l2[6]).slice(0, 1);
   const expiry = fixMrzDigits(l2.slice(8, 14));
-  const expiryCheck = fixMrzDigits(l2[14]).slice(0, 1);
-  const optionalNuip = fixMrzDigits(l2.slice(18, 29).replace(/</g, ""));
+  const optionalNuip = fixMrzDigits(l2.slice(18, 28).replace(/</g, ""));
   const nameLine = l3.replace(/0/g, "O").replace(/<+$/g, "");
 
   const docCedula = docField.replace(/</g, "").replace(/^0+/, "");
-  out.cedula = optionalNuip.length > docCedula.length && /^\d{7,11}$/.test(optionalNuip)
+  out.cedula = optionalNuip.length >= docCedula.length && /^\d{7,11}$/.test(optionalNuip)
     ? optionalNuip.replace(/^0+/, "")
     : docCedula;
   out.genero = ["M", "F"].includes(l2[7]) ? l2[7] : "";
@@ -403,9 +368,17 @@ export function parseMrz(raw: string | null | undefined): ParsedCedula {
     out.nombres = names.slice(2).join(" ");
   }
   out.raw_mrz = lines;
-  out.mrz_valido = validateMrzField(docField.replace(/^0+/, "") || docField, docCheck)
-    && validateMrzField(birth, birthCheck)
-    && validateMrzField(expiry, expiryCheck);
+  out.mrz_valido = validation.valid;
+  if (validation.valid) {
+    out.cedula = validation.cedula!;
+    out.raw_mrz = validation.lines;
+    out.nombres = validation.names!;
+    out.primer_apellido = validation.surname![0] || "";
+    out.segundo_apellido = validation.surname!.slice(1).join(" ");
+    out.fecha_nacimiento = validation.birth!;
+    out.fecha_expiracion = validation.expiry!;
+    out.genero = ["M", "F"].includes(validation.gender!) ? validation.gender! : "";
+  }
   return out;
 }
 

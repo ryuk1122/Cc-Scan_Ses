@@ -52,7 +52,7 @@ type EventoCtxValue = {
   clearEvento: () => void;
   scan: (
     cedula: string,
-    extras?: Partial<Registro> & { raw_barcode?: string },
+    extras?: Partial<Registro> & { capture_source?: string; raw_barcode?: string },
   ) => Promise<{ ok: boolean; mensaje: string; duplicate?: boolean; registro?: Registro }>;
   refreshRegistros: () => Promise<void>;
 };
@@ -79,7 +79,7 @@ type QueueItem = {
   sede: string;
   municipio: string;
   cargo: string;
-  raw_barcode?: string;
+  capture_source?: string; raw_barcode?: string;
   operator_email?: string;
   primer_apellido?: string;
   segundo_apellido?: string;
@@ -353,7 +353,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
           const result = await api.escanear({
             cedula: item.cedula, evento_id: item.evento_id, device_id: item.device_id,
             timestamp: item.timestamp, nonce: item.nonce, nombre: item.nombre, sede: item.sede,
-            municipio: item.municipio, cargo: item.cargo, raw_barcode: item.raw_barcode || "",
+            municipio: item.municipio, cargo: item.cargo, raw_barcode: item.raw_barcode || "", capture_source: item.capture_source || "",
             primer_apellido: item.primer_apellido || "", segundo_apellido: item.segundo_apellido || "",
             nombres: item.nombres || "", genero: item.genero || "", fecha_nacimiento: item.fecha_nacimiento || "",
             fecha_expiracion: item.fecha_expiracion || "", tipo_sangre: item.tipo_sangre || "",
@@ -482,7 +482,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
   }, [eventoId, token, refreshRegistros]);
 
   const scan = useCallback(
-    async (cedulaRaw: string, extras: Partial<Registro> & { raw_barcode?: string } = {}) => {
+    async (cedulaRaw: string, extras: Partial<Registro> & { capture_source?: string; raw_barcode?: string } = {}) => {
       if (!eventoId) return { ok: false, mensaje: "Selecciona un evento primero" };
       const cedula = cedulaRaw.replace(/\D/g, "");
       if (!cedula) return { ok: false, mensaje: "Cédula inválida" };
@@ -516,6 +516,7 @@ export function EventoProvider({ children }: { children: ReactNode }) {
         municipio: (extras as any).municipio || "",
         cargo: (extras as any).cargo || "",
         raw_barcode: extras.raw_barcode || "",
+        capture_source: extras.capture_source || "",
         primer_apellido: (extras as any).primer_apellido || "",
         segundo_apellido: (extras as any).segundo_apellido || "",
         nombres: (extras as any).nombres || "",

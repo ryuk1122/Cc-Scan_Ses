@@ -10,6 +10,7 @@ type GeminiScanResult = {
   fecha_expiracion?: string;
   tipo_sangre?: string;
   mrz_valido?: boolean;
+  requires_review?: boolean;
   _pipeline?: string;
   _gemini?: any;
   error?: string;
@@ -21,12 +22,13 @@ export async function analizarConGemini(imageBase64: string): Promise<GeminiScan
     const normalized = String(imageBase64 || "").replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
     if (!normalized) return { error: "imagen_vacia" };
 
-    const result = await api.ocrCedula(normalized, { forceGemini: true });
+    const result = await api.geminiBackup(normalized);
     return {
       ...(result.parsed || {}),
       cedula: result.cedula,
-      _pipeline: result.pipeline_usado || "backend_ocr",
-      _gemini: result.gemini || {},
+      requires_review: true,
+      mrz_valido: false,
+      _pipeline: "gemini_vision_review",
       error: result.ok ? undefined : result.error || "ocr_no_detecto_documento",
     };
   } catch (error: any) {

@@ -42,6 +42,7 @@ Correcciones v5 (BUG #4):
 from __future__ import annotations
 
 import re
+from mrz_validation import validate_mrz
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -253,60 +254,13 @@ def _fix_mrz_digits(value: str) -> str:
     return (value or "").upper().translate(MRZ_DIGIT_FIXES)
 
 
-def _score_mrz_name_suffix(value: str) -> float:
-    text = re.sub(r"[^A-ZÁÉÍÓÚÜÑ]", "", (value or "").upper())
-    if len(text) < 2:
-        return -99.0
-    vowels = sum(1 for c in text if c in "AEIOUÁÉÍÓÚÜ")
-    score = vowels * 3.0 + min(len(text), 12) * 0.2
-    if re.match(r"^[BCDFGHJKLMNPQRSTVWXYZ][AEIOUÁÉÍÓÚÜ]", text):
-        score += 0.6
-    if re.match(r"^[BCDFGHJKLMNPQRSTVWXYZ]{3,}", text):
-        score -= 6.0
-    leading_filler = re.match(r"^[TSILKCF]+", text)
-    if leading_filler and len(text) > 8:
-        score -= len(leading_filler.group(0)) * 2.0
-    if re.search(r"(SS|II|LL|TT|KK|CC|FF)", text[:6]):
-        score -= 3.0
-    if re.search(r"(.)\1{2,}", text):
-        score -= 4.0
-    return score
-
-
 def _clean_mrz_name_token(value: str) -> str:
-    text = re.sub(r"[^A-ZÁÉÍÓÚÜÑ]", "", (value or "").upper())
-    if len(text) <= 8:
-        return text
-    prefix = text[:10]
-    # OCR a veces convierte muchos '<' de relleno antes del nombre en T/S/I/L/K/C/F.
-    if not re.match(r"^[TSILKCF]{4,}", prefix) and not re.search(r"([TSILKCF])\1{2,}", prefix):
-        return text
-
-    original_score = _score_mrz_name_suffix(text)
-    best = text
-    best_score = original_score
-    for i in range(3, len(text) - 1):
-        junk = text[:i]
-        suffix = text[i:]
-        if len(suffix) < 2 or not all(c in "TSILKCF" for c in junk):
-            continue
-        score = _score_mrz_name_suffix(suffix) + min(i, 10) * 0.35
-        if score > best_score + 0.3:
-            best = suffix
-            best_score = score
-    return best
-
-
-def _is_mrz_filler_name_token(value: str) -> bool:
-    text = re.sub(r"[^A-Z]", "", (value or "").upper())
-    return bool(text and len(text) <= 8 and all(c in MRZ_NAME_FILLER_OCR_CHARS for c in text))
+    # Keep observed letters. A guess about "filler-like" names can erase real identity.
+    return re.sub(r"[^A-ZÁÉÍÓÚÜÑ]", "", (value or "").upper())
 
 
 def _clean_mrz_name_parts(parts: List[str]) -> List[str]:
-    cleaned = [_clean_mrz_name_token(p) for p in parts if p]
-    cleaned = [p for p in cleaned if p]
-    meaningful = [p for p in cleaned if not _is_mrz_filler_name_token(p)]
-    return meaningful if meaningful else cleaned
+    return [cleaned for part in parts if (cleaned := _clean_mrz_name_token(part))]
 
 
 def _td1_doc_check_ok(doc_field: str, check_digit: str) -> bool:
@@ -427,7 +381,8 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
     if not raw:
         return out
 
-    lines = _candidate_mrz_lines(str(raw))
+    validation = validate_mrz(raw)
+    lines = validation['lines'] if validation['valid'] else _candidate_mrz_lines(str(raw))
     if len(lines) < 3:
         return out
 
@@ -499,7 +454,8 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
     doc_ok = _td1_doc_check_ok(doc_field, doc_check)
     birth_ok = validate_mrz_field(birth, birth_check)
     expiry_ok = validate_mrz_field(expiry, expiry_check)
-    mrz_valid = (doc_ok or bool(l2_nuip)) and birth_ok and expiry_ok
+    validation = validate_mrz(raw)
+    mrz_valid = validation["valid"]
 
     out.update({
         "cedula": cedula,
@@ -513,8 +469,15 @@ def parse_mrz_from_text(raw: Optional[str]) -> Dict[str, Any]:
         "fecha_expiracion": _format_mrz_date(expiry, future=True),
         "nacionalidad": nationality,
         "mrz_valido": mrz_valid,
+        "mrz_checks": validation["checks"],
         "raw_mrz": lines[:3],
     })
+    if mrz_valid:
+        out.update({"cedula": validation["cedula"], "nuip": validation["nuip"] or validation["cedula"],
+                    "doc_number": validation["doc"], "raw_mrz": validation["lines"],
+                    "nombres": validation["names"], "primer_apellido": validation["surname"][0],
+                    "segundo_apellido": " ".join(validation["surname"][1:]),
+                    "fecha_nacimiento": validation["birth"], "fecha_expiracion": validation["expiry"]})
     return out
 
 

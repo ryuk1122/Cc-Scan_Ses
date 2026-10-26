@@ -363,7 +363,8 @@ def _decode_mrz_from_base64(image_base64: str) -> dict:
         parsed = mrz.get("parsed") or {}
         raw_mrz = parsed.get("raw_mrz") or mrz.get("raw_mrz") or []
         return {
-            "ok": True,
+            "ok": bool(parsed.get("mrz_valido")),
+            "requires_review": not bool(parsed.get("mrz_valido")),
             "raw": "\n".join(raw_mrz) if raw_mrz else (mrz.get("texto_completo") or ""),
             "cedula": mrz.get("cedula") or "",
             "parsed": parsed,
