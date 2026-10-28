@@ -1,0 +1,52 @@
+name: iOS native trial
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/ios-native-trial']
+    paths: ['frontend/**', 'tests/fixtures/**', '.github/workflows/ios-trial.yml']
+permissions:
+  contents: read
+concurrency:
+  group: ios-native-trial-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.3'
+      - name: Confirm Apple compiler version
+        run: |
+          xcodebuild -version
+          swift --version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+      - name: Validate shared MRZ rules
+        working-directory: frontend
+        run: |
+          npm run test:mrz
+          node scripts/test-ios-pdf417.cjs
+      - name: Build unsigned device application
+        run: bash frontend/scripts/build-ios-trial.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: iOS-build-diagnostics
+          path: frontend/ios/build/ios-build.log
+          retention-days: 3
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CedulaScan-Pro-iOS-Prueba
+          path: frontend/ios-trial/
+          retention-days: 7
+          if-no-files-found: error

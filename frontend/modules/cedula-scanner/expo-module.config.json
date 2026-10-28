@@ -1,1 +1,1 @@
-{"platforms":["android"],"android":{"modules":["expo.modules.cedulascanner.CedulaScannerModule"]}}
+{"platforms":["android","apple"],"android":{"modules":["expo.modules.cedulascanner.CedulaScannerModule"]},"apple":{"modules":["CedulaScannerModule"]}}

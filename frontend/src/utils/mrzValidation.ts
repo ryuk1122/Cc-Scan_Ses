@@ -62,6 +62,7 @@ export class MrzConsensus {
   private at = 0;
   private frame = -1;
   private firstFrame = -1;
+  get progress() { return this.count; }
   reset() { this.key = ''; this.count = 0; this.at = 0; this.frame = -1; this.firstFrame = -1; }
   observeBarcode(identityAccepted: boolean) { if (identityAccepted) this.reset(); }
   observe(raw: string, frame: number, now = Date.now()) {

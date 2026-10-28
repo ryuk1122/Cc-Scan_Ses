@@ -76,12 +76,14 @@ type ServerParsedCedula = Partial<Pick<
   | "mrz_valido"
 >>;
 type OcrReadResult = { raw: string; serverParsed?: ServerParsedCedula; error?: string };
-type PrintPayload = { nombre: string; cargo: string; municipio: string; sede?: string };
+type AfiliadoDisplayData = { nombre: string; cargo: string; municipio: string; sede?: string };
 type ScanFeedback = { kind: "ok" | "dup" | "err"; title: string; detail: string; cedula?: string; municipio?: string };
 
 function scannedPayload(raw?: string | null, data?: string | null): string {
   for (const value of [raw, data]) {
-    const text = String(value || "").trim();
+    const original = String(value || "");
+    if (parsePdf417(original).formato_detectado?.startsWith("pdf417_binario")) return original;
+    const text = original.trim();
     if (text && !/^(null|undefined)$/i.test(text)) return text;
   }
   return "";
@@ -107,7 +109,7 @@ function cleanCedulaNumber(value: string | null | undefined): string {
   return cleanQrDigits(String(value || ""));
 }
 
-function normalizeAfiliadoData(response: any): PrintPayload {
+function normalizeAfiliadoData(response: any): AfiliadoDisplayData {
   const afiliado = response?.afiliado || (response?.encontrado ? response : null) || {};
   const location = afiliado.ubicacion || afiliado.location || afiliado.direccion || {};
   const municipio = [
@@ -210,6 +212,9 @@ function extractQrCedulaPayload(raw: string): string {
 }
 
 function isReliableBarcode(raw: string, currentMode: Mode): boolean {
+  const original = String(raw || "");
+  if (parsePdf417(original).formato_detectado?.startsWith("pdf417_binario")) return true;
+  if (original.includes("\u0000") || original.includes("PubDSK_")) return false;
   const value = String(raw || "").trim();
   if (!value) return false;
   if (currentMode === "manual") return true;
@@ -248,6 +253,9 @@ function isReliableBarcode(raw: string, currentMode: Mode): boolean {
 }
 
 function normalizeQrCedulaPayload(raw: string): string {
+  const original = String(raw || "");
+  if (parsePdf417(original).formato_detectado?.startsWith("pdf417_binario")) return original;
+  if (original.includes("\u0000") || original.includes("PubDSK_")) return original;
   const value = String(raw || "").trim();
   const extracted = extractQrCedulaPayload(value);
   if (extracted) return extracted;

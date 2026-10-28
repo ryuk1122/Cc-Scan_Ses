@@ -2,7 +2,7 @@
   "expo": {
     "name": "CedulaScan Pro",
     "slug": "frontend",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "frontend",
@@ -21,14 +21,10 @@
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.BLUETOOTH",
-        "android.permission.BLUETOOTH_ADMIN",
-        "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.BLUETOOTH_SCAN"
+        "android.permission.CAMERA"
       ],
       "package": "com.anonymous.frontend",
-      "versionCode": 10
+      "versionCode": 11
     },
     "web": {
       "bundler": "metro",
