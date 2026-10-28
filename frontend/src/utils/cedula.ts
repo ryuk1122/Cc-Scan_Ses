@@ -163,33 +163,34 @@ function pdf417Location(municipalityCode: string, departmentCode: string): Parse
   };
 }
 
-function parseClassicPdf417(raw: string | null | undefined): ParsedCedula {
+function parseClassicPdf417Fixed(raw: string | null | undefined): ParsedCedula {
   const out = emptyParsed(raw);
   if (!raw) return out;
-  const bytes = rawToBytes(raw);
-  const hasMarker = bytesIncludeAscii(bytes, PDF417_MARKER);
-  if (bytes.length < PDF417_MIN_CLASSIC_LEN && !hasMarker) return out;
+	const bytes = rawToBytes(raw);
+	const hasMarker = bytesIncludeAscii(bytes, PDF417_MARKER);
+	if (bytes.length < PDF417_MIN_CLASSIC_LEN && !hasMarker) return out;
 
-  const documentRaw = decodePdf417Field(fieldBytes(bytes, "document_number"));
+	const documentRaw = decodePdf417Field(fieldBytes(bytes, "document_number"));
+  if (!/^\d{4,10}$/.test(documentRaw)) return out;
   const documentNumber = documentRaw.replace(/\D/g, "").replace(/^0+/, "");
-  const gender = decodePdf417Field(fieldBytes(bytes, "gender")).toUpperCase();
-  const birthYear = decodePdf417Field(fieldBytes(bytes, "birth_year"));
-  const birthMonth = decodePdf417Field(fieldBytes(bytes, "birth_month"));
-  const birthDay = decodePdf417Field(fieldBytes(bytes, "birth_day"));
+	const gender = decodePdf417Field(fieldBytes(bytes, "gender")).toUpperCase();
+	const birthYear = decodePdf417Field(fieldBytes(bytes, "birth_year"));
+	const birthMonth = decodePdf417Field(fieldBytes(bytes, "birth_month"));
+	const birthDay = decodePdf417Field(fieldBytes(bytes, "birth_day"));
   if (!cleanLeadingZeros(documentNumber) || isDateLike(documentNumber) || (gender && !["M", "F"].includes(gender))) return out;
   if (!validPdf417Date(birthYear, birthMonth, birthDay) && !hasMarker) return out;
 
-  const firstName = decodePdf417Field(fieldBytes(bytes, "first_name"), true);
-  const middleName = decodePdf417Field(fieldBytes(bytes, "middle_name"), true);
-  const municipalityCode = decodePdf417Field(fieldBytes(bytes, "municipality_code"));
-  const departmentCode = decodePdf417Field(fieldBytes(bytes, "department_code"));
-  const bloodType = decodePdf417Field(fieldBytes(bytes, "blood_type")).toUpperCase();
-  const afisCode = decodePdf417Field(fieldBytes(bytes, "afis_code"));
-  const fingerCard = decodePdf417Field(fieldBytes(bytes, "finger_card"));
+	const firstName = decodePdf417Field(fieldBytes(bytes, "first_name"), true);
+	const middleName = decodePdf417Field(fieldBytes(bytes, "middle_name"), true);
+	const municipalityCode = decodePdf417Field(fieldBytes(bytes, "municipality_code"));
+	const departmentCode = decodePdf417Field(fieldBytes(bytes, "department_code"));
+	const bloodType = decodePdf417Field(fieldBytes(bytes, "blood_type")).toUpperCase();
+	const afisCode = decodePdf417Field(fieldBytes(bytes, "afis_code"));
+	const fingerCard = decodePdf417Field(fieldBytes(bytes, "finger_card"));
 
   out.cedula = documentNumber;
-  out.primer_apellido = decodePdf417Field(fieldBytes(bytes, "last_name"), true);
-  out.segundo_apellido = decodePdf417Field(fieldBytes(bytes, "second_last_name"), true);
+	out.primer_apellido = decodePdf417Field(fieldBytes(bytes, "last_name"), true);
+	out.segundo_apellido = decodePdf417Field(fieldBytes(bytes, "second_last_name"), true);
   out.nombres = [firstName, middleName].filter(Boolean).join(" ");
   out.genero = ["M", "F"].includes(gender) ? gender : "";
   out.fecha_nacimiento = formatPdf417Date(birthYear, birthMonth, birthDay);
@@ -204,6 +205,56 @@ function parseClassicPdf417(raw: string | null | undefined): ParsedCedula {
   };
   out.location = pdf417Location(municipalityCode, departmentCode);
   return out;
+}
+
+/** Compact variant supported by Pro's server: NUL-delimited fields instead of fixed byte ranges. */
+function parseClassicPdf417Compact(raw: string | null | undefined): ParsedCedula {
+  const out = emptyParsed(raw);
+  if (!raw || !raw.includes(PDF417_MARKER) || !raw.includes('\u0000')) return out;
+  let parts = raw.replace(/\u0000{2,}/g, '\u0000').split('\u0000');
+  if (parts.length < 6) return out;
+  const afis = (parts[0] || '').slice(2).trim();
+  const finger = (parts[2] || '').slice(0, 8).trim();
+  let documentField: string;
+  let surname: string;
+  if ((parts[2] || '').length > 8) {
+    const joined = parts[2];
+    documentField = joined.slice(10, 20); surname = joined.slice(20);
+  } else {
+    parts = parts.slice(1);
+    const joined = parts[2] || '';
+    documentField = joined.slice(0, 10); surname = joined.slice(10);
+  }
+  if (!/^\d{4,10}$/.test(documentField)) return out;
+  const cedula = documentField.replace(/^0+/, '');
+  if (!cleanLeadingZeros(cedula)) return out;
+  const metaValid = (value: string) => /^[0-9][MF]\d{13}/.test(value)
+    && validPdf417Date(value.slice(2, 6), value.slice(6, 8), value.slice(8, 10));
+  // Some documents omit the second given name entirely; do not interpret metadata as a name.
+  const noMiddle = metaValid(parts[5] || '');
+  const meta = (noMiddle ? parts[5] : parts[6]) || '';
+  if (!metaValid(meta)) return out;
+  const first = cleanTextField(parts[4] || '');
+  const last = cleanTextField(surname);
+  if (!first || !last) return out;
+  const blood = meta.slice(16, 18).toUpperCase();
+  out.cedula = cedula;
+  out.primer_apellido = last;
+  out.segundo_apellido = cleanTextField(parts[3] || '');
+  out.nombres = [first, noMiddle ? '' : cleanTextField(parts[5] || '')].filter(Boolean).join(' ');
+  out.genero = meta[1];
+  out.fecha_nacimiento = formatPdf417Date(meta.slice(2, 6), meta.slice(6, 8), meta.slice(8, 10));
+  out.tipo_sangre = /^(AB|O|A|B)[+\-]$/.test(blood) ? blood : '';
+  out.formato_detectado = 'pdf417_binario_compacto';
+  out.afis_code = afis; out.finger_card = finger;
+  out.document_info = { document_number: cedula, afis_code: afis, finger_card: finger };
+  out.location = pdf417Location(meta.slice(10, 12), meta.slice(12, 15));
+  return out;
+}
+
+function parseClassicPdf417(raw: string | null | undefined): ParsedCedula {
+  const fixed = parseClassicPdf417Fixed(raw);
+  return fixed.cedula ? fixed : parseClassicPdf417Compact(raw);
 }
 
 function mrzCharValue(char: string): number {
@@ -402,8 +453,9 @@ export function extractCedula(raw: string | null | undefined): string | null {
   let s = String(raw).trim();
   if (!s) return null;
 
-  const classic = parseClassicPdf417(s);
+  const classic = parseClassicPdf417(String(raw));
   if (classic.cedula) return classic.cedula;
+  if (String(raw).includes("\u0000") || String(raw).includes(PDF417_MARKER)) return null;
 
   const mrz = parseMrz(s);
   if (mrz.cedula) return cleanLeadingZeros(mrz.cedula) ? mrz.cedula : null;
@@ -461,8 +513,9 @@ export function parsePdf417(raw: string | null | undefined): ParsedCedula {
   if (!raw) return out;
   let s = String(raw).trim();
 
-  const classic = parseClassicPdf417(s);
+  const classic = parseClassicPdf417(String(raw));
   if (classic.cedula) return classic;
+  if (String(raw).includes("\u0000") || String(raw).includes(PDF417_MARKER)) return out;
 
   const mrz = parseMrz(s);
   if (mrz.cedula) Object.assign(out, mrz);

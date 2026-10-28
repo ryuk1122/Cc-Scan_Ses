@@ -25,7 +25,9 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Validate shared MRZ rules
         working-directory: frontend
-        run: npm run test:mrz
+        run: |
+          npm run test:mrz
+          node scripts/test-ios-pdf417.cjs
       - name: Build unsigned device application
         run: bash frontend/scripts/build-ios-trial.sh
       - uses: actions/upload-artifact@v4
