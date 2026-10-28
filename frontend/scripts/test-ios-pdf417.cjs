@@ -87,4 +87,37 @@ for (const fixture of fixtures.filter(f => f.valid)) {
   });
 }
 
-if (failures.length) { console.error(failures.join("\n")); process.exitCode = 1; } else console.log(`${passed} PDF417 parser and screen normalization checks passed`);
+async function saveFlow() {
+  let handle;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'handleScan') handle = node.initializer.arguments[0];
+    ts.forEachChild(node, visit);
+  }
+  visit(source); assert.ok(handle);
+  const mrz = require('../src/utils/mrzValidation.ts');
+  for (const raw of [0,9,32,160].map(header=>payload(header)).concat([compactPayload(false,1),compactPayload(true,4)])) {
+    const saved=[], noop=()=>{}, busy={current:false};
+    const fn=vm.runInNewContext(ts.transpileModule('('+printer.printNode(ts.EmitHint.Expression,handle,source)+')',{
+      compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}
+    }).outputText,{
+      ...parser,...screen,...mrz,Date,Promise,
+      mode:'camera',scanBusyRef:busy,setScannerEnabled:noop,showToast:noop,
+      setDocumentPreview:noop,buildDocumentPreview:()=>({}),lastScanRef:{current:null},
+      lookupSequence:{current:0},lookupMunicipioRef:{current:null},setPreview:noop,setPreviewLoading:noop,setScanFeedback:noop,
+      api:{lookupAfiliado:async()=>({encontrado:false})},
+      scan:async(cedula,fields)=>{saved.push({cedula,...fields});return {ok:true,mensaje:'Registro de prueba'};},
+      Haptics:{notificationAsync:async()=>{},NotificationFeedbackType:{Success:'ok',Warning:'warning'}},rearmScanner:noop,
+    });
+    assert.equal(await fn(raw),true);
+    assert.equal(saved.length,1);
+    assert.equal(saved[0].cedula,'1234567890');
+    assert.equal(saved[0].nombre,'ANA MARÍA MUÑOZ PÉREZ');
+    assert.equal(saved[0].raw_barcode,raw);
+    assert.equal(busy.current,false);
+    passed++;
+  }
+}
+saveFlow().then(()=>{
+  if(failures.length){console.error(failures.join('\n'));process.exitCode=1;}
+  else console.log(`${passed} PDF417 checks passed, including screen-to-save flow preserving full names and binary payload`);
+}).catch(error=>{console.error(error);process.exitCode=1;});
