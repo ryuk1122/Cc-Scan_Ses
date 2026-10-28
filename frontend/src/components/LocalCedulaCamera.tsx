@@ -1,7 +1,7 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Alert, AppState, Platform, StyleSheet, Text, TouchableOpacity, View, type ViewProps } from 'react-native';
 import { requireNativeView, requireOptionalNativeModule } from 'expo';
-import { MrzConsensus } from '../utils/mrzValidation';
+import { MrzConsensus, validateMrz } from '../utils/mrzValidation';
 import { ScannerSession } from '../utils/scannerSession';
 
 type Event<T> = { nativeEvent: T };
@@ -13,7 +13,7 @@ type Props = ViewProps & {
 type NativeProps = ViewProps & {
   ref?: React.Ref<LocalCameraRef>;
   active: boolean; torch: boolean; session: number;
-  onObservation: (event: Event<{ raw: string; frameId: number; generation: number; session: number }>) => void;
+  onObservation: (event: Event<{ raw: string; frameId: number; generation: number; session: number; guidance?: string }>) => void;
   onStatus: (event: Event<{ code: string; message: string; session: number }>) => void;
   onBarcode: (event: Event<{ raw: string; type: string; session: number }>) => void;
   onError: (event: Event<{ message: string; session: number }>) => void;
@@ -25,7 +25,7 @@ export type LocalCameraRef = {
   resetPerformance: () => Promise<void>;
   recordConfirmation: (firstFrameId: number) => Promise<void>;
 };
-export const localScannerAvailable = Platform.OS === 'android' && !!requireOptionalNativeModule('CedulaScanner');
+export const localScannerAvailable = (Platform.OS === 'android' || Platform.OS === 'ios') && !!requireOptionalNativeModule('CedulaScanner');
 const NativeCamera = localScannerAvailable
   ? requireNativeView<NativeProps>('CedulaScanner') : null;
 
@@ -59,7 +59,7 @@ export const LocalCedulaCamera = forwardRef<LocalCameraRef, Props>(function Loca
     return () => listener.remove();
   }, []);
   useEffect(() => { consensus.current.reset(); }, [running]);
-  const observe = useCallback(({ nativeEvent: event }: Event<{ raw: string; frameId: number; generation: number; session: number }>) => {
+  const observe = useCallback(({ nativeEvent: event }: Event<{ raw: string; frameId: number; generation: number; session: number; guidance?: string }>) => {
     if (!session.current.accepts(event.session)) return;
     if (generation.current !== event.generation) {
       consensus.current.reset(); generation.current = event.generation;
@@ -76,7 +76,13 @@ export const LocalCedulaCamera = forwardRef<LocalCameraRef, Props>(function Loca
       void onMrz(raw).then(accepted => {
         if (!accepted && acceptedRaw.current === raw) acceptedRaw.current = '';
       }).catch(() => { if (acceptedRaw.current === raw) acceptedRaw.current = ''; });
-    } else setMessage('Comprobando las tres líneas; mantén la cédula quieta');
+    } else {
+      const validation = validateMrz(event.raw);
+      setMessage(validation.valid ? `Lectura local ${consensus.current.progress}/3; mantén la cédula quieta`
+        : event.guidance || (validation.checks.complete
+          ? 'MRZ detectada: vuelve a enfocar para comprobar los dígitos'
+          : 'MRZ detectada: acerca las tres líneas para leerlas completas'));
+    }
   }, [onMrz]);
   const showPerformance = async () => {
     try {
@@ -89,6 +95,7 @@ export const LocalCedulaCamera = forwardRef<LocalCameraRef, Props>(function Loca
       Alert.alert('Velocidad medida en este teléfono', [
         line('Código decodificado', 'barcodeDetectedMs'), line('Detección de MRZ', 'mrzDetectedMs'),
         line('Confirmación de 3 lecturas', 'mrzConfirmationMs'),
+        `Cuadros OCR procesados: ${data?.ocrProcessingMs?.samples ?? 0}. Última ventana de líneas de texto: ${data?.ocrLines ? `${data.ocrLines.p50Ms.toFixed(0)} (mediana)` : 'sin lecturas'}.`,
         'p95: el 95% de las muestras tarda ese tiempo o menos. Desde cuadros analizados; no incluye enfocar, guardar ni sincronizar.',
       ].join('\n\n'), [{ text: 'Cerrar' }, { text: 'Reiniciar medición', onPress: () => { void native.current?.resetPerformance().catch(() => {}); } }]);
     } catch { Alert.alert('Medición no disponible', 'Vuelve a abrir la cámara para medir.'); }
@@ -123,9 +130,14 @@ export const LocalCedulaCamera = forwardRef<LocalCameraRef, Props>(function Loca
         <TouchableOpacity accessibilityLabel="Cambiar iluminación" onPress={() => setTorch(value => !value)} style={styles.button}>
           <Text style={styles.label}>{torch ? 'Apagar luz' : 'Encender luz'}</Text>
         </TouchableOpacity>
-        {failed && <TouchableOpacity onPress={() => { setFailed(false); setCameraKey(value => value+1); }} style={styles.button}>
-          <Text style={styles.label}>Reintentar cámara</Text>
-        </TouchableOpacity>}
+        <TouchableOpacity onPress={() => {
+          consensus.current.reset(); acceptedRaw.current = ''; missingSince.current = 0;
+          generation.current = -1; session.current.setActive(false);
+          setFailed(false); setCameraKey(value => value+1);
+          setMessage('Iniciando lector local…');
+        }} style={styles.button}>
+          <Text style={styles.label}>Reiniciar cámara</Text>
+        </TouchableOpacity>
       </View>
     </View>
   </View>;
