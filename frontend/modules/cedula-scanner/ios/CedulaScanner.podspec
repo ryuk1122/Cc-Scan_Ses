@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.homepage = 'https://github.com/ryuk1122/Cc-Scan_Ses'
   s.source = { :git => 'https://github.com/ryuk1122/Cc-Scan_Ses.git' }
   s.platform = :ios, '16.4'
-  s.swift_version = '5.9'
+  s.swift_version = '5.0'
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
   s.frameworks = 'AVFoundation', 'Vision', 'CoreImage', 'CoreVideo'
