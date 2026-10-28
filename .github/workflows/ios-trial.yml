@@ -38,6 +38,13 @@ jobs:
       - name: Build unsigned device application
         run: bash frontend/scripts/build-ios-trial.sh
       - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: iOS-build-diagnostics
+          path: frontend/ios/build/ios-build.log
+          retention-days: 3
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         with:
           name: CedulaScan-Pro-iOS-Prueba
           path: frontend/ios-trial/

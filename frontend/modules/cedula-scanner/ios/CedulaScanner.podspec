@@ -20,6 +20,8 @@ Pod::Spec.new do |s|
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_TARGET_SRCROOT)/vendor/zxing/core/src"',
+    # React Native also has Point.h. Quoted ZXing includes must resolve its own headers first.
+    'OTHER_CPLUSPLUSFLAGS' => '$(inherited) -iquote "$(PODS_TARGET_SRCROOT)/vendor/zxing/core/src"',
     'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) ZXING_BUILD_READERS ZXING_BUILD_WRITERS',
     'SWIFT_STRICT_CONCURRENCY' => 'minimal'
   }

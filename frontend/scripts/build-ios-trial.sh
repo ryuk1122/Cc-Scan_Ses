@@ -16,10 +16,15 @@ npx expo prebuild --platform ios --no-install
 cd ios
 pod install
 SCHEME=$(node -p "require('../app.json').expo.name.replace(/[^a-zA-Z0-9]/g, '')")
-xcodebuild -workspace "$SCHEME.xcworkspace" -scheme "$SCHEME" \
+mkdir -p build
+if ! xcodebuild -workspace "$SCHEME.xcworkspace" -scheme "$SCHEME" \
   -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
   -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY='' build
+  CODE_SIGN_IDENTITY='' build > build/ios-build.log 2>&1; then
+  node -e 'const fs=require("fs");const a=fs.readFileSync("build/ios-build.log","utf8").split("\n");console.error(a.filter(x=>/ error:|fatal error:|BUILD FAILED/.test(x)).slice(0,80).join("\n"));console.error(a.slice(-35).join("\n"));'
+  exit 1
+fi
+echo 'iPhone Release build succeeded'
 APP="build/Build/Products/Release-iphoneos/$SCHEME.app"
 test -d "$APP"
 test -f "$APP/main.jsbundle"
